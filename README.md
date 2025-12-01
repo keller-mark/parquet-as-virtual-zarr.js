@@ -4,6 +4,9 @@ This is an effort to read and write Arrow/Parquet data via the Zarr store interf
 In other words, given a Parquet file, we want to conceptually/virtually mapping arrow row-groups to Zarr chunks.
 In particular, we can rely on the AnnData-Zarr [on-disk dataframe format](https://anndata.readthedocs.io/en/latest/fileformat-prose.html)) and [Zarrwhals](https://github.com/srivarra/zarrwhals).
 
+
+As a proof-of-concept, we will first implement this mapping using Python. However eventually, we want to implement this via Rust.
+
 ## Virtual arrow-to-zarr mapping
 
 ### `/.zattrs` (Zarr v2) or `/zarr.json` (Zarr v3) attrs for root of dataframe
