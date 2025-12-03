@@ -1,4 +1,4 @@
-# arrow-as-zarr
+# arrow-as-virtual-zarr
 
 This is an effort to read and write Arrow/Parquet data via the Zarr store interface.
 In other words, given a Parquet file, we want to conceptually/virtually mapping arrow row-groups to Zarr chunks.
