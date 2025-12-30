@@ -1,0 +1,5 @@
+__pycache__/
+data/
+.ipynb_checkpoints/
+__marimo__/
+.DS_Store
