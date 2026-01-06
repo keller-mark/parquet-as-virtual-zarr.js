@@ -27,4 +27,6 @@ For instance, if your Zarr store key was `/cell_type/0`, then this corresponds t
 
 -----
 
+Related?: https://github.com/zarr-developers/zarr-extensions/pull/41
+
 Note: This is not an effort to read [Zarr as Arrow](https://github.com/datafusion-contrib/arrow-zarr/issues/36) (the reverse).
