@@ -1,15 +1,6 @@
 // @ts-ignore - hyparquet is a JS package; types generated on build
-import {
-  asyncBufferFromFile,
-  parquetMetadataAsync,
-  parquetReadObjects,
-} from "hyparquet";
-import type { AsyncReadable, AbsolutePath, RangeQuery } from '@zarrita/storage';
-
-type AbsolutePath = `/${string}`;
-type RangeQuery =
-  | { offset: number; length: number }
-  | { suffixLength: number };
+import { parquetMetadata, parquetReadObjects } from "hyparquet";
+import type { AsyncReadable, AbsolutePath, RangeQuery } from "@zarrita/storage";
 
 /**
  * Virtual Zarr store that exposes a Parquet file as an AnnData-Zarr dataframe.
@@ -30,33 +21,96 @@ type RangeQuery =
  *   /{col}/categories/.zattrs         → {}
  *   /{col}/categories/.zarray         → categories array metadata
  *   /{col}/categories/0               → categories chunk bytes (vlen-utf8)
+ *
+ * The Parquet file is expected to be accessible at key "/" of the inner store.
+ * Use `ParquetAsAnnDataFrameZarr.fromStore(store)` to construct an instance.
  */
-export class ParquetAsAnnDataFrameZarr implements AsyncReadable<{ signal: AbortSignal }> {
-  #internal_store: AsyncReadable;
+export class ParquetAsAnnDataFrameZarr implements AsyncReadable {
+  readonly #store: AsyncReadable;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   #metadata: any = null;
+  // hyparquet AsyncBuffer backed by ranged reads through #store
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   #asyncBuffer: any = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   #pandasMeta: any = null;
   #categoriesCache = new Map<string, string[]>();
 
-  constructor(internal_store: AsyncReadable) {
-    this.#internal_store = internal_store;
+  constructor(store: AsyncReadable) {
+    this.#store = store;
   }
 
-  static async fromStore(internal_store: AsyncReadable): Promise<ParquetAsAnnDataFrameZarr> {
-    // The Parquet file (or multi-part Parquet directory) will be located at the root key "/" of internal_store.
-    return new ParquetAsAnnDataFrameZarr(internal_store);
+  /**
+   * Construct a store from any AsyncReadable whose key "/" returns the raw
+   * Parquet file bytes (e.g. `new FileSystemStore("/path/to/data.parquet")`).
+   */
+  static fromStore(store: AsyncReadable): ParquetAsAnnDataFrameZarr {
+    return new ParquetAsAnnDataFrameZarr(store);
   }
 
+  /**
+   * Lazily initialise: read parquet metadata and build an AsyncBuffer that
+   * delegates byte-range reads to the inner store via getRange.
+   *
+   * A single full read of key "/" is performed once to discover the file's
+   * byte length. All subsequent reads (metadata footer, column chunks) use
+   * ranged reads, so only the minimal required bytes are fetched.
+   */
   async #init(): Promise<void> {
     if (this.#metadata) return;
-    this.#asyncBuffer = await asyncBufferFromFile(this.#filePath);
-    this.#metadata = await parquetMetadataAsync(this.#asyncBuffer);
+
+    if (!this.#store.getRange) {
+      throw new Error("ParquetAsAnnDataFrameZarr: inner store must support getRange");
+    }
+
+    // Step 1: Read last 8 bytes to discover metadata length and validate magic.
+    const tail = await this.#store.getRange("/", { suffixLength: 8 });
+    if (!tail) throw new Error("ParquetAsAnnDataFrameZarr: getRange returned nothing for parquet footer tail");
+    const tailBuf = tail.buffer.slice(tail.byteOffset, tail.byteOffset + tail.byteLength) as ArrayBuffer;
+    const tailView = new DataView(tailBuf);
+    // Validate PAR1 magic (last 4 bytes of the file).
+    if (tailView.getUint32(4, true) !== 0x31524150) {
+      throw new Error("ParquetAsAnnDataFrameZarr: not a valid parquet file (missing PAR1 magic)");
+    }
+    const metadataLength = tailView.getUint32(0, true);
+
+    // Step 2: Fetch exactly the footer bytes (metadata + 8-byte suffix).
+    const footerSize = metadataLength + 8;
+    const footerBytes = await this.#store.getRange("/", { suffixLength: footerSize });
+    if (!footerBytes) throw new Error("ParquetAsAnnDataFrameZarr: failed to fetch parquet footer");
+    const footerBuf = footerBytes.buffer.slice(
+      footerBytes.byteOffset,
+      footerBytes.byteOffset + footerBytes.byteLength,
+    ) as ArrayBuffer;
+
+    this.#metadata = parquetMetadata(footerBuf);
+
+    // AsyncBuffer for hyparquet column reads.
+    // byteLength is set to MAX_SAFE_INTEGER because all column-chunk reads
+    // supply explicit start/end bounds from parquet metadata — hyparquet never
+    // issues an open-ended slice for row-group reads.
+    this.#asyncBuffer = {
+      byteLength: Number.MAX_SAFE_INTEGER,
+      slice: async (start: number, end?: number): Promise<ArrayBuffer> => {
+        if (end === undefined) {
+          throw new Error("ParquetAsAnnDataFrameZarr: unbounded slice — this is a bug");
+        }
+        const length = end - start;
+        if (length <= 0) return new ArrayBuffer(0);
+        const bytes = await this.#store.getRange!("/", { offset: start, length });
+        if (!bytes) {
+          throw new Error(`ParquetAsAnnDataFrameZarr: getRange returned nothing for offset=${start} length=${length}`);
+        }
+        return bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        ) as ArrayBuffer;
+      },
+    };
+
     const pandasKv = this.#metadata.key_value_metadata?.find(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (kv: any) => kv.key === "pandas"
+      (kv: any) => kv.key === "pandas",
     );
     if (pandasKv) {
       this.#pandasMeta = JSON.parse(pandasKv.value);
@@ -93,22 +147,15 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable<{ signal: AbortS
 
   /** Map parquet physical type to zarr v2 dtype string. */
   #parquetTypeToDtype(colName: string): string {
-    const schema = this.#metadata.schema.find(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (s: any) => s.name === colName
-    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const schema = this.#metadata.schema.find((s: any) => s.name === colName);
     if (!schema) return "|O";
     switch (schema.type) {
-      case "FLOAT":
-        return "<f4";
-      case "DOUBLE":
-        return "<f8";
-      case "INT32":
-        return "<i4";
-      case "INT64":
-        return "<i8";
-      default:
-        return "|O";
+      case "FLOAT":  return "<f4";
+      case "DOUBLE": return "<f8";
+      case "INT32":  return "<i4";
+      case "INT64":  return "<i8";
+      default:       return "|O";
     }
   }
 
@@ -123,11 +170,8 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable<{ signal: AbortS
   }
 
   #totalRows(): number {
-    return this.#metadata.row_groups.reduce(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (sum: number, rg: any) => sum + Number(rg.num_rows),
-      0
-    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return this.#metadata.row_groups.reduce((sum: number, rg: any) => sum + Number(rg.num_rows), 0);
   }
 
   #rowsInGroup(rgIndex: number): number {
@@ -136,13 +180,9 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable<{ signal: AbortS
 
   /**
    * Read a slice of one column using hyparquet.
-   * Only the byte ranges covering [rowStart, rowEnd) are fetched.
+   * Only the byte ranges covering [rowStart, rowEnd) are fetched from the store.
    */
-  async #readColumnSlice(
-    colName: string,
-    rowStart: number,
-    rowEnd: number
-  ): Promise<unknown[]> {
+  async #readColumnSlice(colName: string, rowStart: number, rowEnd: number): Promise<unknown[]> {
     const rows = (await parquetReadObjects({
       file: this.#asyncBuffer,
       metadata: this.#metadata,
@@ -161,11 +201,7 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable<{ signal: AbortS
     if (this.#categoriesCache.has(colName)) {
       return this.#categoriesCache.get(colName)!;
     }
-    const allValues = await this.#readColumnSlice(
-      colName,
-      0,
-      this.#totalRows()
-    );
+    const allValues = await this.#readColumnSlice(colName, 0, this.#totalRows());
     const categories = [...new Set(allValues as string[])].sort();
     this.#categoriesCache.set(colName, categories);
     return categories;
@@ -174,12 +210,12 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable<{ signal: AbortS
   /** Encode a numeric array as little-endian typed array bytes. */
   #encodeTypedArray(data: number[], dtype: string): Uint8Array {
     let buffer: ArrayBuffer;
-    if (dtype === "<f4") buffer = new Float32Array(data).buffer;
+    if (dtype === "<f4")     buffer = new Float32Array(data).buffer;
     else if (dtype === "<f8") buffer = new Float64Array(data).buffer;
     else if (dtype === "<i4") buffer = new Int32Array(data).buffer;
     else if (dtype === "<i2") buffer = new Int16Array(data).buffer;
     else if (dtype === "|i1") buffer = new Int8Array(data).buffer;
-    else buffer = new Int32Array(data).buffer;
+    else                      buffer = new Int32Array(data).buffer;
     return new Uint8Array(buffer);
   }
 
@@ -190,9 +226,7 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable<{ signal: AbortS
   #encodeVlenUtf8(strings: (string | null | undefined)[]): Uint8Array {
     const encoder = new TextEncoder();
     const encoded = strings.map((s) => encoder.encode(s ?? ""));
-    const totalBytes =
-      4 +
-      encoded.reduce((sum, e) => sum + 4 + e.byteLength, 0);
+    const totalBytes = 4 + encoded.reduce((sum, e) => sum + 4 + e.byteLength, 0);
     const buffer = new ArrayBuffer(totalBytes);
     const view = new DataView(buffer);
     view.setUint32(0, strings.length, true);
@@ -212,19 +246,20 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable<{ signal: AbortS
 
   /** Choose the tightest signed integer dtype for a given category count. */
   #codeDtype(numCategories: number): string {
-    if (numCategories <= 128) return "|i1";
+    if (numCategories <= 128)  return "|i1";
     if (numCategories <= 32768) return "<i2";
     return "<i4";
   }
 
-  async get(key: AbsolutePath): Promise<Uint8Array | undefined> {
+  async get(key: AbsolutePath, _opts?: unknown): Promise<Uint8Array | undefined> {
     await this.#init();
     return this.#route(key);
   }
 
   async getRange(
     key: AbsolutePath,
-    range: RangeQuery
+    range: RangeQuery,
+    _opts?: unknown,
   ): Promise<Uint8Array | undefined> {
     const data = await this.get(key);
     if (!data) return undefined;
@@ -261,7 +296,7 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable<{ signal: AbortS
     const dtype = this.#parquetTypeToDtype(colName);
     const numRows = this.#totalRows();
     const numRgs = this.#metadata.row_groups.length;
-    // Maximum rows per row group (first group, assumed representative)
+    // Chunk size equals the size of the first row group (assumed representative).
     const maxRowsPerRg = this.#rowsInGroup(0);
 
     // /{col}/.zattrs  /{col}/.zgroup  /{col}/.zarray  /{col}/{rg}
@@ -270,22 +305,12 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable<{ signal: AbortS
 
       if (subkey === ".zattrs") {
         if (isCat) {
-          return this.#json({
-            ordered: false,
-            "encoding-type": "categorical",
-            "encoding-version": "0.2.0",
-          });
+          return this.#json({ ordered: false, "encoding-type": "categorical", "encoding-version": "0.2.0" });
         }
         if (isIndex) {
-          return this.#json({
-            "encoding-type": "string-array",
-            "encoding-version": "0.2.0",
-          });
+          return this.#json({ "encoding-type": "string-array", "encoding-version": "0.2.0" });
         }
-        return this.#json({
-          "encoding-type": "array",
-          "encoding-version": "0.2.0",
-        });
+        return this.#json({ "encoding-type": "array", "encoding-version": "0.2.0" });
       }
 
       if (subkey === ".zgroup") {

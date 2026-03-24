@@ -4,6 +4,7 @@ import { resolve, dirname } from "node:path";
 import { describe, test, expect, beforeAll } from "vitest";
 // @ts-ignore - hyparquet is a JS package
 import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from "hyparquet";
+import FileSystemStore from "@zarrita/storage/fs";
 import { ParquetAsAnnDataFrameZarr } from "../src/parquet-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -54,7 +55,7 @@ let parquetMeta: any;
 let asyncBuf: any;
 
 beforeAll(async () => {
-  store = new ParquetAsAnnDataFrameZarr(PARQUET_PATH);
+  store = ParquetAsAnnDataFrameZarr.fromStore(new FileSystemStore(PARQUET_PATH));
   asyncBuf = await asyncBufferFromFile(PARQUET_PATH);
   parquetMeta = await parquetMetadataAsync(asyncBuf);
 });

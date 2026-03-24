@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "hyparquet": "1.25.1",
+    "hyparquet": "^1.25.1",
     "@zarrita/storage": "^0.1.4",
     "zarrita": "^0.6.1"
   },
