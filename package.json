@@ -1,9 +1,24 @@
 {
   "name": "arrow-as-virtual-zarr",
   "version": "0.1.0",
+  "type": "module",
   "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
-    "generate-fixtures": "uv run fixtures/generate_fixtures.py"
+    "generate-fixtures": "uv run fixtures/generate_fixtures.py",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hyparquet": "1.25.1",
+    "@zarrita/storage": "^0.1.4",
+    "zarrita": "^0.6.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
   },
   "packageManager": "pnpm@9.0.0"
 }
