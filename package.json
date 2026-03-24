@@ -1,0 +1,9 @@
+{
+  "name": "arrow-as-virtual-zarr",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "generate-fixtures": "uv run fixtures/generate_fixtures.py"
+  },
+  "packageManager": "pnpm@9.0.0"
+}

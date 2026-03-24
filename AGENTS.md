@@ -5,8 +5,9 @@ This repository contains the following as git submodules, for your reference:
 
 - zarrita.js: Zarr implementation in TypeScript/JavaScript.
 - hyparquet: JavaScript library for reading Parquet data.
+  - Important files: `read.js` and `query.js`
 - flechette: JavaScript library for reading Apache Arrow data.
-
+- anndata.js: JavaScript library for reading AnnData objects from AnnData-Zarr format (including dataframes contained within AnnData objects).
 
 
 ## Project goal

@@ -3,7 +3,7 @@
 Read Arrow and Parquet data via the Zarr store interface.
 Given a Parquet file, we want to conceptually/virtually map Arrow columns and row-groups to Zarr chunks.
 
-We can rely on the AnnData-Zarr [on-disk dataframe format](https://anndata.readthedocs.io/en/latest/fileformat-prose.html)) and [Zarrwhals](https://github.com/srivarra/zarrwhals).
+We can rely on the AnnData-Zarr [on-disk dataframe format](https://anndata.readthedocs.io/en/latest/fileformat-prose.html).
 
 
 

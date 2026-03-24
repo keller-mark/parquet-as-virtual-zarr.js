@@ -3,3 +3,5 @@ data/
 .ipynb_checkpoints/
 __marimo__/
 .DS_Store
+node_modules/
+fixtures/output/

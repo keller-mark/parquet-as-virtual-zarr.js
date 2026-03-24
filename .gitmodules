@@ -1,0 +1,12 @@
+[submodule "zarrita.js"]
+	path = zarrita.js
+	url = https://github.com/manzt/zarrita.js
+[submodule "hyparquet"]
+	path = hyparquet
+	url = https://github.com/hyparam/hyparquet
+[submodule "flechette"]
+	path = flechette
+	url = https://github.com/uwdata/flechette
+[submodule "anndata.js"]
+	path = anndata.js
+	url = https://github.com/ilan-gold/anndata.js
