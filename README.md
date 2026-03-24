@@ -1,11 +1,11 @@
-# arrow-as-virtual-zarr
+# arrow-as-virtual-zarr.js
 
-This is an effort to read and write Arrow/Parquet data via the Zarr store interface.
-In other words, given a Parquet file, we want to conceptually/virtually mapping arrow row-groups to Zarr chunks.
-In particular, we can rely on the AnnData-Zarr [on-disk dataframe format](https://anndata.readthedocs.io/en/latest/fileformat-prose.html)) and [Zarrwhals](https://github.com/srivarra/zarrwhals).
+Read Arrow and Parquet data via the Zarr store interface.
+Given a Parquet file, we want to conceptually/virtually map Arrow columns and row-groups to Zarr chunks.
+
+We can rely on the AnnData-Zarr [on-disk dataframe format](https://anndata.readthedocs.io/en/latest/fileformat-prose.html)) and [Zarrwhals](https://github.com/srivarra/zarrwhals).
 
 
-As a proof-of-concept, we will first implement this mapping using Python. However eventually, we want to implement this via Rust.
 
 ## Virtual arrow-to-zarr mapping
 
@@ -27,6 +27,9 @@ For instance, if your Zarr store key was `/cell_type/0`, then this corresponds t
 
 -----
 
-Related?: https://github.com/zarr-developers/zarr-extensions/pull/41
+### Related work:
+- https://github.com/zarr-developers/zarr-extensions/pull/41
+- https://github.com/srivarra/zarrwhals
+- https://github.com/hypertidy/zaro
 
 Note: This is not an effort to read [Zarr as Arrow](https://github.com/datafusion-contrib/arrow-zarr/issues/36) (the reverse).
