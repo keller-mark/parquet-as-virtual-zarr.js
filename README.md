@@ -1,4 +1,4 @@
-# arrow-as-virtual-zarr.js
+# parquet-as-virtual-zarr.js
 
 Read Arrow and Parquet data via the Zarr store interface.
 Given a Parquet file, we want to conceptually/virtually map Arrow columns and row-groups to Zarr chunks.
