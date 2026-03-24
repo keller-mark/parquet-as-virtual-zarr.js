@@ -4,8 +4,8 @@
 This repository contains the following as git submodules, for your reference:
 
 - zarrita.js: Zarr implementation in TypeScript/JavaScript.
-- hyparquet
-- flechette
+- hyparquet: JavaScript library for reading Parquet data.
+- flechette: JavaScript library for reading Apache Arrow data.
 
 
 
@@ -14,8 +14,8 @@ This repository contains the following as git submodules, for your reference:
 Read Parquet files as virtual Zarr-based dataframes (conforming to the dataframe part of the AnnData-Zarr on-disk file format spec) — without copying or re-encoding the Arrow data.
 Columns within row groups are fetched directly as Zarr chunks by mapping Zarr chunk key requests to byte ranges within the Parquet file.
 
-ParquetAsAnnDataFrameZarr should be defined in the NPM package and exported. This class must implement zarrita's
-AsyncReadable interface. Given the virtualization convention defined in the README, this store should enable a user to run .get and
+`ParquetAsAnnDataFrameZarr` and `ArrowAsAnnDataFrameZarr` classes should be defined in the NPM package and exported. Each class must implement zarrita's
+AsyncReadable interface. Given the virtualization convention defined in the README, each store should enable a user to run .get and
  .getRange to obtain the store's metadata or array data. Internally, the store should fetch the Parquet data for the
 corresponding metadata or array chunks. Metadata should be transformed and re-encoded to match what would be
 returned when running .get or .getRange on the equivalent AnnData-Zarr dataframe. Unit tests should ensure this equivalence of metadata and
