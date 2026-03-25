@@ -1,5 +1,5 @@
 // @ts-ignore - hyparquet is a JS package; types generated on build
-import { parquetMetadata, parquetReadObjects } from "hyparquet";
+import { parquetMetadata, parquetRead } from "hyparquet";
 import type { AsyncReadable, AbsolutePath, RangeQuery } from "@zarrita/storage";
 
 interface PartInfo {
@@ -255,36 +255,70 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable {
   }
 
   /**
-   * Read a slice of one column from a specific row group using hyparquet.
-   * Automatically selects the correct part file for multi-part stores.
+   * Compute the local [rowStart, rowEnd) within a part for a given global row group index.
    */
-  async #readColumnSliceForRg(colName: string, rgIndex: number): Promise<unknown[]> {
+  #localRowRangeForRg(rgIndex: number): { part: PartInfo; localRowStart: number; localRowEnd: number } {
     const mapping = this.#rgMap[rgIndex];
     const part = this.#parts[mapping.partIndex];
-    // Compute local row range within this part
     let localRowStart = 0;
     for (let i = 0; i < mapping.localRgIndex; i++) {
       localRowStart += Number(part.metadata.row_groups[i].num_rows);
     }
     const localRowEnd = localRowStart + Number(part.metadata.row_groups[mapping.localRgIndex].num_rows);
-    const rows = (await parquetReadObjects({
+    return { part, localRowStart, localRowEnd };
+  }
+
+  /**
+   * Read one column from a specific row group via parquetRead onChunk.
+   * For numeric columns, returns the raw typed array (e.g. Float32Array).
+   * For string columns, returns a plain string array.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async #readColumnChunkForRg(colName: string, rgIndex: number): Promise<any> {
+    const { part, localRowStart, localRowEnd } = this.#localRowRangeForRg(rgIndex);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const chunks: any[] = [];
+    await parquetRead({
       file: part.asyncBuffer,
       metadata: part.metadata,
       columns: [colName],
       rowStart: localRowStart,
       rowEnd: localRowEnd,
-    })) as Record<string, unknown>[];
-    return rows.map((r) => r[colName]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      onChunk(chunk: any) {
+        chunks.push(chunk.columnData);
+      },
+    });
+    if (chunks.length === 1) return chunks[0];
+    // Multiple pages: concatenate
+    if (ArrayBuffer.isView(chunks[0])) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const Ctor = (chunks[0] as any).constructor as { new (len: number): any };
+      const totalLen = chunks.reduce((s: number, c: { length: number }) => s + c.length, 0);
+      const merged = new Ctor(totalLen);
+      let offset = 0;
+      for (const c of chunks) {
+        merged.set(c, offset);
+        offset += c.length;
+      }
+      return merged;
+    }
+    return chunks.flat();
   }
 
   /**
    * Read all values for a column across all parts/row groups.
+   * Always returns a flat array of values (for category extraction).
    */
   async #readAllColumnValues(colName: string): Promise<unknown[]> {
     const allValues: unknown[] = [];
     for (let rg = 0; rg < this.#numRowGroups(); rg++) {
-      const values = await this.#readColumnSliceForRg(colName, rg);
-      allValues.push(...values);
+      const chunk = await this.#readColumnChunkForRg(colName, rg);
+      if (ArrayBuffer.isView(chunk)) {
+        allValues.push(...Array.from(chunk as unknown as ArrayLike<unknown>));
+      } else {
+        allValues.push(...chunk);
+      }
     }
     return allValues;
   }
@@ -534,9 +568,15 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable {
     if (parts.length === 3 && parts[1] === "c" && !isCat) {
       const rgIndex = Number(parts[2]);
       if (Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < numRgs) {
-        const data = await this.#readColumnSliceForRg(colName, rgIndex);
-        if (dtype === "|O") return this.#encodeVlenUtf8(data as string[]);
-        return this.#encodeTypedArray(data as number[], dtype);
+        const chunkData = await this.#readColumnChunkForRg(colName, rgIndex);
+        if (ArrayBuffer.isView(chunkData)) {
+          // Typed array from hyparquet (PLAIN-encoded numerics) — return raw bytes
+          const ta = chunkData as ArrayBufferView;
+          return new Uint8Array(ta.buffer, ta.byteOffset, ta.byteLength);
+        }
+        if (dtype === "|O") return this.#encodeVlenUtf8(chunkData as string[]);
+        // Plain array of numbers (dictionary-encoded) — encode to typed array
+        return this.#encodeTypedArray(chunkData as number[], dtype);
       }
     }
 
@@ -550,10 +590,13 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable {
         if (parts.length === 4 && parts[2] === "c") {
           const rgIndex = Number(parts[3]);
           if (Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < numRgs) {
-            const data = await this.#readColumnSliceForRg(colName, rgIndex);
+            const chunkData = await this.#readColumnChunkForRg(colName, rgIndex);
+            const values = Array.isArray(chunkData)
+              ? chunkData as string[]
+              : Array.from(chunkData as ArrayLike<string>);
             const categories = await this.#getCategories(colName);
             const catMap = new Map(categories.map((c, i) => [c, i]));
-            const codes = (data as string[]).map((v) => catMap.get(v) ?? 0);
+            const codes = values.map((v) => catMap.get(v) ?? 0);
             const codeDtype = this.#codeDtype(categories.length);
             return this.#encodeTypedArray(codes, codeDtype);
           }
