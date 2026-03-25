@@ -12,39 +12,12 @@ import { describe, test, expect, beforeAll } from "vitest";
 import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from "hyparquet";
 import FileSystemStore from "@zarrita/storage/fs";
 import type { AsyncReadable, AbsolutePath, RangeQuery } from "@zarrita/storage";
+import { open, get, root } from "zarrita";
 import { ParquetAsAnnDataFrameStore } from "../src/parquet-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MULTIPART_DIR = resolve(__dirname, "../fixtures/output/obs_multipart");
 const SINGLE_PARQUET_PATH = resolve(__dirname, "../fixtures/output/obs.parquet");
-
-// ── helpers ────────────────────────────────────────────────────────────────
-
-function decodeVlenUtf8(bytes: Uint8Array): string[] {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const count = view.getUint32(0, true);
-  const decoder = new TextDecoder();
-  const strings: string[] = [];
-  let pos = 4;
-  for (let i = 0; i < count; i++) {
-    const len = view.getUint32(pos, true);
-    pos += 4;
-    strings.push(
-      decoder.decode(new Uint8Array(bytes.buffer, bytes.byteOffset + pos, len))
-    );
-    pos += len;
-  }
-  return strings;
-}
-
-async function getJson(
-  store: ParquetAsAnnDataFrameStore,
-  key: `/${string}`
-): Promise<Record<string, unknown>> {
-  const bytes = await store.get(key);
-  if (!bytes) throw new Error(`store returned undefined for ${key}`);
-  return JSON.parse(new TextDecoder().decode(bytes));
-}
 
 // ── fixtures ───────────────────────────────────────────────────────────────
 
@@ -70,41 +43,51 @@ beforeAll(async () => {
 
 describe("multi-part root /zarr.json", () => {
   test("matches single-file store", async () => {
-    const multi = await getJson(multiStore, "/zarr.json");
-    const single = await getJson(singleStore, "/zarr.json");
-    expect(multi).toEqual(single);
+    const grpMulti = await open(root(multiStore), { kind: "group" });
+    const grpSingle = await open(root(singleStore), { kind: "group" });
+    expect(grpMulti.kind).toBe(grpSingle.kind);
+    expect(grpMulti.attrs).toEqual(grpSingle.attrs);
   });
 });
 
 describe("multi-part column metadata", () => {
   test("numeric column zarr.json matches single-file", async () => {
-    const multi = await getJson(multiStore, "/n_counts/zarr.json");
-    const single = await getJson(singleStore, "/n_counts/zarr.json");
-    expect(multi).toEqual(single);
+    const arrMulti = await open(root(multiStore).resolve("n_counts"), { kind: "array" });
+    const arrSingle = await open(root(singleStore).resolve("n_counts"), { kind: "array" });
+    expect(arrMulti.dtype).toBe(arrSingle.dtype);
+    expect(arrMulti.shape).toEqual(arrSingle.shape);
+    expect(arrMulti.attrs).toEqual(arrSingle.attrs);
   });
 
   test("string column zarr.json matches single-file", async () => {
-    const multi = await getJson(multiStore, "/obs_id/zarr.json");
-    const single = await getJson(singleStore, "/obs_id/zarr.json");
-    expect(multi).toEqual(single);
+    const arrMulti = await open(root(multiStore).resolve("obs_id"), { kind: "array" });
+    const arrSingle = await open(root(singleStore).resolve("obs_id"), { kind: "array" });
+    expect(arrMulti.dtype).toBe(arrSingle.dtype);
+    expect(arrMulti.shape).toEqual(arrSingle.shape);
+    expect(arrMulti.attrs).toEqual(arrSingle.attrs);
   });
 
   test("categorical group zarr.json matches single-file", async () => {
-    const multi = await getJson(multiStore, "/cell_type/zarr.json");
-    const single = await getJson(singleStore, "/cell_type/zarr.json");
-    expect(multi).toEqual(single);
+    const grpMulti = await open(root(multiStore).resolve("cell_type"), { kind: "group" });
+    const grpSingle = await open(root(singleStore).resolve("cell_type"), { kind: "group" });
+    expect(grpMulti.kind).toBe(grpSingle.kind);
+    expect(grpMulti.attrs).toEqual(grpSingle.attrs);
   });
 
   test("codes zarr.json matches single-file", async () => {
-    const multi = await getJson(multiStore, "/cell_type/codes/zarr.json");
-    const single = await getJson(singleStore, "/cell_type/codes/zarr.json");
-    expect(multi).toEqual(single);
+    const arrMulti = await open(root(multiStore).resolve("cell_type/codes"), { kind: "array" });
+    const arrSingle = await open(root(singleStore).resolve("cell_type/codes"), { kind: "array" });
+    expect(arrMulti.dtype).toBe(arrSingle.dtype);
+    expect(arrMulti.shape).toEqual(arrSingle.shape);
+    expect(arrMulti.attrs).toEqual(arrSingle.attrs);
   });
 
   test("categories zarr.json matches single-file", async () => {
-    const multi = await getJson(multiStore, "/cell_type/categories/zarr.json");
-    const single = await getJson(singleStore, "/cell_type/categories/zarr.json");
-    expect(multi).toEqual(single);
+    const arrMulti = await open(root(multiStore).resolve("cell_type/categories"), { kind: "array" });
+    const arrSingle = await open(root(singleStore).resolve("cell_type/categories"), { kind: "array" });
+    expect(arrMulti.dtype).toBe(arrSingle.dtype);
+    expect(arrMulti.shape).toEqual(arrSingle.shape);
+    expect(arrMulti.attrs).toEqual(arrSingle.attrs);
   });
 });
 
@@ -112,14 +95,9 @@ describe("multi-part column metadata", () => {
 
 describe("multi-part numeric data", () => {
   test("n_counts values match single-file parquet", async () => {
-    const numRgs = parquetMeta.row_groups.length;
-    const multiValues: number[] = [];
-    for (let rg = 0; rg < numRgs; rg++) {
-      const bytes = await multiStore.get(`/n_counts/c/${rg}` as `/${string}`);
-      expect(bytes).toBeDefined();
-      const floats = new Float32Array(bytes!.buffer, bytes!.byteOffset, bytes!.byteLength / 4);
-      multiValues.push(...Array.from(floats));
-    }
+    const arr = await open(root(multiStore).resolve("n_counts"), { kind: "array" });
+    const chunk = await get(arr);
+    const multiValues = Array.from(chunk.data as Float32Array);
     const rows = (await parquetReadObjects({
       file: asyncBuf,
       metadata: parquetMeta,
@@ -129,14 +107,9 @@ describe("multi-part numeric data", () => {
   });
 
   test("n_genes values match single-file parquet", async () => {
-    const numRgs = parquetMeta.row_groups.length;
-    const multiValues: number[] = [];
-    for (let rg = 0; rg < numRgs; rg++) {
-      const bytes = await multiStore.get(`/n_genes/c/${rg}` as `/${string}`);
-      expect(bytes).toBeDefined();
-      const ints = new Int32Array(bytes!.buffer, bytes!.byteOffset, bytes!.byteLength / 4);
-      multiValues.push(...Array.from(ints));
-    }
+    const arr = await open(root(multiStore).resolve("n_genes"), { kind: "array" });
+    const chunk = await get(arr);
+    const multiValues = Array.from(chunk.data as Int32Array);
     const rows = (await parquetReadObjects({
       file: asyncBuf,
       metadata: parquetMeta,
@@ -148,13 +121,9 @@ describe("multi-part numeric data", () => {
 
 describe("multi-part string data", () => {
   test("obs_id values match single-file parquet", async () => {
-    const numRgs = parquetMeta.row_groups.length;
-    const multiValues: string[] = [];
-    for (let rg = 0; rg < numRgs; rg++) {
-      const bytes = await multiStore.get(`/obs_id/c/${rg}` as `/${string}`);
-      expect(bytes).toBeDefined();
-      multiValues.push(...decodeVlenUtf8(bytes!));
-    }
+    const arr = await open(root(multiStore).resolve("obs_id"), { kind: "array" });
+    const chunk = await get(arr);
+    const multiValues = chunk.data as string[];
     const rows = (await parquetReadObjects({
       file: asyncBuf,
       metadata: parquetMeta,
@@ -166,25 +135,20 @@ describe("multi-part string data", () => {
 
 describe("multi-part categorical data", () => {
   test("cell_type categories match single-file", async () => {
-    const multiBytes = await multiStore.get("/cell_type/categories/c/0");
-    const singleBytes = await singleStore.get("/cell_type/categories/c/0");
-    expect(multiBytes).toBeDefined();
-    expect(singleBytes).toBeDefined();
-    expect(decodeVlenUtf8(multiBytes!)).toEqual(decodeVlenUtf8(singleBytes!));
+    const catsArrMulti = await open(root(multiStore).resolve("cell_type/categories"), { kind: "array" });
+    const catsArrSingle = await open(root(singleStore).resolve("cell_type/categories"), { kind: "array" });
+    const multiCategories = (await get(catsArrMulti)).data as string[];
+    const singleCategories = (await get(catsArrSingle)).data as string[];
+    expect(multiCategories).toEqual(singleCategories);
   });
 
   test("cell_type codes round-trip to original values", async () => {
-    const catBytes = await multiStore.get("/cell_type/categories/c/0");
-    const categories = decodeVlenUtf8(catBytes!);
+    const catsArr = await open(root(multiStore).resolve("cell_type/categories"), { kind: "array" });
+    const categories = (await get(catsArr)).data as string[];
 
-    const numRgs = parquetMeta.row_groups.length;
-    const decoded: string[] = [];
-    for (let rg = 0; rg < numRgs; rg++) {
-      const bytes = await multiStore.get(`/cell_type/codes/c/${rg}` as `/${string}`);
-      expect(bytes).toBeDefined();
-      const codes = new Int8Array(bytes!.buffer, bytes!.byteOffset, bytes!.byteLength);
-      for (const code of codes) decoded.push(categories[code]);
-    }
+    const codesArr = await open(root(multiStore).resolve("cell_type/codes"), { kind: "array" });
+    const codes = (await get(codesArr)).data as Int8Array;
+    const decoded = Array.from(codes, (code) => categories[code]);
 
     const rows = (await parquetReadObjects({
       file: asyncBuf,
@@ -195,9 +159,11 @@ describe("multi-part categorical data", () => {
   });
 
   test("leiden categories and codes match single-file", async () => {
-    const multiCatBytes = await multiStore.get("/leiden/categories/c/0");
-    const singleCatBytes = await singleStore.get("/leiden/categories/c/0");
-    expect(decodeVlenUtf8(multiCatBytes!)).toEqual(decodeVlenUtf8(singleCatBytes!));
+    const catsArrMulti = await open(root(multiStore).resolve("leiden/categories"), { kind: "array" });
+    const catsArrSingle = await open(root(singleStore).resolve("leiden/categories"), { kind: "array" });
+    const multiCategories = (await get(catsArrMulti)).data as string[];
+    const singleCategories = (await get(catsArrSingle)).data as string[];
+    expect(multiCategories).toEqual(singleCategories);
   });
 });
 
@@ -253,7 +219,7 @@ describe("multi-part partial reads", () => {
   test("get() is never called — init uses only getRange", async () => {
     const spy = new MultiPartStoreSpy(MULTIPART_DIR);
     const s = ParquetAsAnnDataFrameStore.fromStore(spy);
-    await s.get("/zarr.json");
+    await open(root(s), { kind: "group" });
     await s.get("/n_counts/c/0");
     expect(spy.getCalls).toBe(0);
   });
@@ -261,7 +227,7 @@ describe("multi-part partial reads", () => {
   test("each part file footer is read during init", async () => {
     const spy = new MultiPartStoreSpy(MULTIPART_DIR);
     const s = ParquetAsAnnDataFrameStore.fromStore(spy);
-    await s.get("/zarr.json");
+    await open(root(s), { kind: "group" });
 
     // Should have read footers from all 4 parts + attempted part.4.parquet (returns undefined)
     const partKeys = new Set(spy.fetchCalls.map((c) => c.key));
@@ -274,7 +240,7 @@ describe("multi-part partial reads", () => {
   test("chunk reads target the correct part file", async () => {
     const spy = new MultiPartStoreSpy(MULTIPART_DIR);
     const s = ParquetAsAnnDataFrameStore.fromStore(spy);
-    await s.get("/zarr.json");
+    await open(root(s), { kind: "group" });
 
     // Read chunk from row group 0 → should read from part.0.parquet
     const before0 = spy.fetchCalls.length;

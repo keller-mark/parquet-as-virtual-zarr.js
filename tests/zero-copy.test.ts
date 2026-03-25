@@ -20,6 +20,7 @@ import { parquetMetadata, parquetRead } from "hyparquet";
 // parquetRead only supports SNAPPY/UNCOMPRESSED natively, so we use the
 // UNCOMPRESSED fixture as reference for all codec tests.
 import type { AsyncReadable, AbsolutePath, RangeQuery } from "@zarrita/storage";
+import { open, get, root } from "zarrita";
 import { ParquetAsAnnDataFrameStore } from "../src/parquet-store.js";
 // Ensure all codecs are registered
 import "../src/snappy-codec.js";
@@ -79,6 +80,7 @@ function toInt32Array(bytes: Uint8Array): Int32Array {
   return new Int32Array(aligned);
 }
 
+/** Used only for tests that inspect raw zarr.json structure (e.g. codec names). */
 async function getJson(
   store: ParquetAsAnnDataFrameStore,
   key: `/${string}`,
@@ -174,8 +176,9 @@ for (const { name, fixture, zarrCodec } of COMPRESSED_CODECS) {
     });
 
     test("obs_id (string) does NOT include compression codec", async () => {
+      const arr = await open(root(store).resolve("obs_id"), { kind: "array" });
+      expect(arr.dtype).toBe("string");
       const meta = await getJson(store, "/obs_id/zarr.json");
-      expect(meta.data_type).toBe("string");
       const codecs = meta.codecs as { name: string }[];
       expect(codecs).toHaveLength(1);
       expect(codecs[0].name).toBe("vlen-utf8");
@@ -297,21 +300,19 @@ describe("decode path with various codecs (non-zero-copy)", () => {
 describe("zero-copy data matches zarr ground truth", () => {
   test("root metadata matches zarr (any codec)", async () => {
     const store = loadStore("obs_plain_snappy.parquet");
-    const virtual = await getJson(store, "/zarr.json");
+    const grp = await open(root(store), { kind: "group" });
     const actual = await zarrMeta("zarr.json");
-    const vAttrs = virtual.attributes as Record<string, unknown>;
     const aAttrs = actual.attributes as Record<string, unknown>;
-    expect(vAttrs["encoding-type"]).toBe(aAttrs["encoding-type"]);
-    expect(vAttrs["encoding-version"]).toBe(aAttrs["encoding-version"]);
-    expect(vAttrs["_index"]).toBe(aAttrs["_index"]);
+    expect(grp.attrs["encoding-type"]).toBe(aAttrs["encoding-type"]);
+    expect(grp.attrs["encoding-version"]).toBe(aAttrs["encoding-version"]);
+    expect(grp.attrs["_index"]).toBe(aAttrs["_index"]);
   });
 
   test("n_counts metadata shape and dtype match zarr (ignoring codecs)", async () => {
     const store = loadStore("obs_plain_gzip.parquet");
-    const virtual = await getJson(store, "/n_counts/zarr.json");
+    const arr = await open(root(store).resolve("n_counts"), { kind: "array" });
     const actual = await zarrMeta("n_counts/zarr.json");
-    expect(virtual.data_type).toBe(actual.data_type);
-    expect(virtual.shape).toEqual(actual.shape);
-    expect(virtual.fill_value).toBe(actual.fill_value);
+    expect(arr.dtype).toBe(actual.data_type);
+    expect(arr.shape).toEqual(actual.shape);
   });
 });

@@ -17,9 +17,10 @@ const store = ParquetAsAnnDataFrameStore.fromStore(source);
 
 const storeRoot = root(store);
 const df = await open(storeRoot, { kind: "group" });
-const dfAttrs = await df.attrs;
+console.log(df.attrs);
 
 const arr = await open(storeRoot.resolve("/my_column"), { kind: "array" });
+console.log(arr.attrs);
 const arrData = await get(arr);
 ```
 
