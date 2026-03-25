@@ -1,11 +1,27 @@
 # parquet-as-virtual-zarr.js
 
-Read Arrow and Parquet data via the Zarr store interface.
-Given a Parquet file, we want to conceptually/virtually map Arrow columns and row-groups to Zarr chunks.
+Read Parquet data via the Zarr store interface.
+Given a Parquet file, we want to conceptually/virtually map its columns and row-groups to Zarr chunks.
 
-We can rely on the AnnData-Zarr [on-disk dataframe format](https://anndata.readthedocs.io/en/latest/fileformat-prose.html).
+To do so, we rely on the AnnData-Zarr [on-disk dataframe format](https://anndata.readthedocs.io/en/latest/fileformat-prose.html#dataframes).
 
+## Usage
 
+```ts
+import { open, get, root } from "zarrita";
+import { FetchStore } from "@zarrita/storage";
+import { ParquetAsAnnDataFrameStore } from "parquet-as-virtual-zarr";
+
+const internalStore = new FetchStore("https://example.com/data.parquet");
+const store = ParquetAsAnnDataFrameStore.fromStore(source);
+
+const storeRoot = root(store);
+const df = await open(storeRoot, { kind: "group" });
+const dfAttrs = await df.attrs;
+
+const arr = await open(storeRoot.resolve("/my_column"), { kind: "array" });
+const arrData = await get(arr);
+```
 
 ## Virtual arrow-to-zarr mapping
 
