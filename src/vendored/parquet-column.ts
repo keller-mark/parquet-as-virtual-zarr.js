@@ -129,7 +129,7 @@ async function decompressGzip(bytes: Uint8Array): Promise<Uint8Array> {
   const ds = new DecompressionStream("gzip");
   const writer = ds.writable.getWriter();
   const reader = ds.readable.getReader();
-  writer.write(bytes);
+  writer.write(bytes.buffer instanceof SharedArrayBuffer ? new Uint8Array(bytes) : bytes as unknown as BufferSource);
   writer.close();
   const chunks: Uint8Array[] = [];
   while (true) {
