@@ -5,7 +5,7 @@ import { describe, test, expect, beforeAll } from "vitest";
 // @ts-ignore - hyparquet is a JS package
 import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from "hyparquet";
 import FileSystemStore from "@zarrita/storage/fs";
-import { ParquetAsAnnDataFrameZarr } from "../src/parquet-store.js";
+import { ParquetAsAnnDataFrameStore } from "../src/parquet-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PARQUET_PATH = resolve(__dirname, "../fixtures/output/obs.parquet");
@@ -39,7 +39,7 @@ async function zarrMeta(subpath: string): Promise<Record<string, unknown>> {
 }
 
 async function getJson(
-  store: ParquetAsAnnDataFrameZarr,
+  store: ParquetAsAnnDataFrameStore,
   key: `/${string}`
 ): Promise<Record<string, unknown>> {
   const bytes = await store.get(key);
@@ -49,14 +49,14 @@ async function getJson(
 
 // ── fixtures ───────────────────────────────────────────────────────────────
 
-let store: ParquetAsAnnDataFrameZarr;
+let store: ParquetAsAnnDataFrameStore;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let parquetMeta: any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let asyncBuf: any;
 
 beforeAll(async () => {
-  store = ParquetAsAnnDataFrameZarr.fromStore(new FileSystemStore(PARQUET_PATH));
+  store = ParquetAsAnnDataFrameStore.fromStore(new FileSystemStore(PARQUET_PATH));
   asyncBuf = await asyncBufferFromFile(PARQUET_PATH);
   parquetMeta = await parquetMetadataAsync(asyncBuf);
 });

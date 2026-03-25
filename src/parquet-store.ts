@@ -37,7 +37,7 @@ interface RgMapping {
  *   /{col}/categories/zarr.json       → categories array metadata
  *   /{col}/categories/c/0            → categories chunk bytes (vlen-utf8)
  */
-export class ParquetAsAnnDataFrameZarr implements AsyncReadable {
+export class ParquetAsAnnDataFrameStore implements AsyncReadable {
   readonly #store: AsyncReadable;
   #initialized = false;
   /** Per-part parquet metadata and async buffers. */
@@ -52,8 +52,8 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable {
     this.#store = store;
   }
 
-  static fromStore(store: AsyncReadable): ParquetAsAnnDataFrameZarr {
-    return new ParquetAsAnnDataFrameZarr(store);
+  static fromStore(store: AsyncReadable): ParquetAsAnnDataFrameStore {
+    return new ParquetAsAnnDataFrameStore(store);
   }
 
   /**
@@ -63,7 +63,7 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable {
    */
   async #readParquetFooter(storeKey: string): Promise<PartInfo | null> {
     if (!this.#store.getRange) {
-      throw new Error("ParquetAsAnnDataFrameZarr: inner store must support getRange");
+      throw new Error("ParquetAsAnnDataFrameStore: inner store must support getRange");
     }
 
     // Read last 8 bytes to discover metadata length and validate magic.
@@ -95,13 +95,13 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable {
       byteLength: Number.MAX_SAFE_INTEGER,
       slice: async (start: number, end?: number): Promise<ArrayBuffer> => {
         if (end === undefined) {
-          throw new Error("ParquetAsAnnDataFrameZarr: unbounded slice — this is a bug");
+          throw new Error("ParquetAsAnnDataFrameStore: unbounded slice — this is a bug");
         }
         const length = end - start;
         if (length <= 0) return new ArrayBuffer(0);
         const bytes = await this.#store.getRange!(storeKey as AbsolutePath, { offset: start, length });
         if (!bytes) {
-          throw new Error(`ParquetAsAnnDataFrameZarr: getRange returned nothing for key=${storeKey} offset=${start} length=${length}`);
+          throw new Error(`ParquetAsAnnDataFrameStore: getRange returned nothing for key=${storeKey} offset=${start} length=${length}`);
         }
         return bytes.buffer.slice(
           bytes.byteOffset,
@@ -136,7 +136,7 @@ export class ParquetAsAnnDataFrameZarr implements AsyncReadable {
         partIndex++;
       }
       if (parts.length === 0) {
-        throw new Error("ParquetAsAnnDataFrameZarr: no valid parquet file found (tried '/' and '/part.0.parquet')");
+        throw new Error("ParquetAsAnnDataFrameStore: no valid parquet file found (tried '/' and '/part.0.parquet')");
       }
       this.#parts = parts;
     }

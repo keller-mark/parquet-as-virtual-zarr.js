@@ -1,4 +1,4 @@
-import { ParquetAsAnnDataFrameZarr } from "parquet-as-virtual-zarr";
+import { ParquetAsAnnDataFrameStore } from "parquet-as-virtual-zarr";
 
 /**
  * AsyncReadable backed by a browser File object.
@@ -116,7 +116,7 @@ async function processFile(file) {
 
   try {
     const source = new FileSource(file);
-    const store = ParquetAsAnnDataFrameZarr.fromStore(source);
+    const store = ParquetAsAnnDataFrameStore.fromStore(source);
     const bytes = await store.get("/zarr.json");
     if (!bytes) throw new Error("Store returned nothing for /zarr.json");
     const zarrJson = JSON.parse(new TextDecoder().decode(bytes));

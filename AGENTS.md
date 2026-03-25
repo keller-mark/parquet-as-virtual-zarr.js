@@ -15,7 +15,7 @@ This repository contains the following as git submodules, for your reference:
 Read Parquet files as virtual Zarr-based dataframes (conforming to the dataframe part of the AnnData-Zarr on-disk file format spec) — without copying or re-encoding the Arrow data.
 Columns within row groups are fetched directly as Zarr chunks by mapping Zarr chunk key requests to byte ranges within the Parquet file.
 
-`ParquetAsAnnDataFrameZarr` and `ArrowAsAnnDataFrameZarr` classes should be defined in the NPM package and exported. Each class must implement zarrita's
+`ParquetAsAnnDataFrameStore` and `ArrowAsAnnDataFrameStore` classes should be defined in the NPM package and exported. Each class must implement zarrita's
 AsyncReadable interface. Given the virtualization convention defined in the README, each store should enable a user to run .get and
  .getRange to obtain the store's metadata or array data. Internally, the store should fetch the Parquet data for the
 corresponding metadata or array chunks. Metadata should be transformed and re-encoded to match what would be

@@ -1,5 +1,5 @@
 /**
- * Verify that ParquetAsAnnDataFrameZarr reads the minimal number of bytes
+ * Verify that ParquetAsAnnDataFrameStore reads the minimal number of bytes
  * from its inner AsyncReadable store.
  *
  * Strategy
@@ -21,7 +21,7 @@ import { describe, test, expect, beforeAll } from "vitest";
 // @ts-ignore - hyparquet is a JS package
 import { asyncBufferFromFile, parquetMetadataAsync } from "hyparquet";
 import type { AsyncReadable, AbsolutePath, RangeQuery } from "@zarrita/storage";
-import { ParquetAsAnnDataFrameZarr } from "../src/parquet-store.js";
+import { ParquetAsAnnDataFrameStore } from "../src/parquet-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PARQUET_PATH = resolve(__dirname, "../fixtures/output/obs.parquet");
@@ -30,7 +30,7 @@ const PARQUET_PATH = resolve(__dirname, "../fixtures/output/obs.parquet");
 
 /**
  * In-memory AsyncReadable that records every get() and getRange() call.
- * get() should never be called by ParquetAsAnnDataFrameZarr (it always uses getRange).
+ * get() should never be called by ParquetAsAnnDataFrameStore (it always uses getRange).
  * getRange() slices the in-memory buffer and appends to fetchCalls.
  */
 class StoreSpy implements AsyncReadable {
@@ -331,6 +331,6 @@ describe("unique bytes fraction", () => {
 
 // ── tiny helper to keep tests concise ─────────────────────────────────────
 
-function store(spy: StoreSpy): ParquetAsAnnDataFrameZarr {
-  return ParquetAsAnnDataFrameZarr.fromStore(spy);
+function store(spy: StoreSpy): ParquetAsAnnDataFrameStore {
+  return ParquetAsAnnDataFrameStore.fromStore(spy);
 }

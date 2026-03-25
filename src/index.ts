@@ -1,1 +1,1 @@
-export { ParquetAsAnnDataFrameZarr } from "./parquet-store.js";
+export { ParquetAsAnnDataFrameStore } from "./parquet-store.js";

@@ -12,7 +12,7 @@ import { describe, test, expect, beforeAll } from "vitest";
 import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from "hyparquet";
 import FileSystemStore from "@zarrita/storage/fs";
 import type { AsyncReadable, AbsolutePath, RangeQuery } from "@zarrita/storage";
-import { ParquetAsAnnDataFrameZarr } from "../src/parquet-store.js";
+import { ParquetAsAnnDataFrameStore } from "../src/parquet-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MULTIPART_DIR = resolve(__dirname, "../fixtures/output/obs_multipart");
@@ -38,7 +38,7 @@ function decodeVlenUtf8(bytes: Uint8Array): string[] {
 }
 
 async function getJson(
-  store: ParquetAsAnnDataFrameZarr,
+  store: ParquetAsAnnDataFrameStore,
   key: `/${string}`
 ): Promise<Record<string, unknown>> {
   const bytes = await store.get(key);
@@ -48,18 +48,18 @@ async function getJson(
 
 // ── fixtures ───────────────────────────────────────────────────────────────
 
-let multiStore: ParquetAsAnnDataFrameZarr;
-let singleStore: ParquetAsAnnDataFrameZarr;
+let multiStore: ParquetAsAnnDataFrameStore;
+let singleStore: ParquetAsAnnDataFrameStore;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let parquetMeta: any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let asyncBuf: any;
 
 beforeAll(async () => {
-  multiStore = ParquetAsAnnDataFrameZarr.fromStore(
+  multiStore = ParquetAsAnnDataFrameStore.fromStore(
     new FileSystemStore(MULTIPART_DIR)
   );
-  singleStore = ParquetAsAnnDataFrameZarr.fromStore(
+  singleStore = ParquetAsAnnDataFrameStore.fromStore(
     new FileSystemStore(SINGLE_PARQUET_PATH)
   );
   asyncBuf = await asyncBufferFromFile(SINGLE_PARQUET_PATH);
@@ -252,7 +252,7 @@ class MultiPartStoreSpy implements AsyncReadable {
 describe("multi-part partial reads", () => {
   test("get() is never called — init uses only getRange", async () => {
     const spy = new MultiPartStoreSpy(MULTIPART_DIR);
-    const s = ParquetAsAnnDataFrameZarr.fromStore(spy);
+    const s = ParquetAsAnnDataFrameStore.fromStore(spy);
     await s.get("/zarr.json");
     await s.get("/n_counts/c/0");
     expect(spy.getCalls).toBe(0);
@@ -260,7 +260,7 @@ describe("multi-part partial reads", () => {
 
   test("each part file footer is read during init", async () => {
     const spy = new MultiPartStoreSpy(MULTIPART_DIR);
-    const s = ParquetAsAnnDataFrameZarr.fromStore(spy);
+    const s = ParquetAsAnnDataFrameStore.fromStore(spy);
     await s.get("/zarr.json");
 
     // Should have read footers from all 4 parts + attempted part.4.parquet (returns undefined)
@@ -273,7 +273,7 @@ describe("multi-part partial reads", () => {
 
   test("chunk reads target the correct part file", async () => {
     const spy = new MultiPartStoreSpy(MULTIPART_DIR);
-    const s = ParquetAsAnnDataFrameZarr.fromStore(spy);
+    const s = ParquetAsAnnDataFrameStore.fromStore(spy);
     await s.get("/zarr.json");
 
     // Read chunk from row group 0 → should read from part.0.parquet
