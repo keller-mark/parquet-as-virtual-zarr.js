@@ -117,11 +117,18 @@ async function processFile(file) {
   try {
     const source = new FileSource(file);
     const store = ParquetAsAnnDataFrameZarr.fromStore(source);
-    const bytes = await store.get("/.zattrs");
-    if (!bytes) throw new Error("Store returned nothing for /.zattrs");
-    const zattrs = JSON.parse(new TextDecoder().decode(bytes));
-    output.textContent = JSON.stringify(zattrs, null, 2);
+    const bytes = await store.get("/zarr.json");
+    if (!bytes) throw new Error("Store returned nothing for /zarr.json");
+    const zarrJson = JSON.parse(new TextDecoder().decode(bytes));
+    output.textContent = JSON.stringify(zarrJson, null, 2);
     output.style.display = "block";
+
+    const consolidated = await store.getConsolidatedMetadata();
+    const consolidatedOutput = document.getElementById("consolidated-output");
+    const consolidatedHeading = document.getElementById("consolidated-heading");
+    consolidatedOutput.textContent = JSON.stringify(consolidated, null, 2);
+    consolidatedOutput.style.display = "block";
+    consolidatedHeading.style.display = "block";
 
     const bytesRead = source.uniqueBytesFetched();
     const pct = ((bytesRead / file.size) * 100).toFixed(1);

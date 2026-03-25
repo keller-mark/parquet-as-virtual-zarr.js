@@ -32,7 +32,8 @@ function decodeVlenUtf8(bytes: Uint8Array): string[] {
   return strings;
 }
 
-async function zarrAttrs(subpath: string): Promise<Record<string, unknown>> {
+/** Read and parse a zarr.json file from the ground-truth zarr store. */
+async function zarrMeta(subpath: string): Promise<Record<string, unknown>> {
   const text = await readFile(resolve(ZARR_OBS, subpath), "utf-8");
   return JSON.parse(text);
 }
@@ -62,54 +63,54 @@ beforeAll(async () => {
 
 // ── metadata tests ─────────────────────────────────────────────────────────
 
-describe("root /.zattrs", () => {
-  test("encoding-type and encoding-version match zarr", async () => {
-    const virtual = await getJson(store, "/.zattrs");
-    const actual = await zarrAttrs(".zattrs");
-    expect(virtual["encoding-type"]).toBe(actual["encoding-type"]);
-    expect(virtual["encoding-version"]).toBe(actual["encoding-version"]);
+describe("root /zarr.json", () => {
+  test("zarr_format is 3 and node_type is group", async () => {
+    const virtual = await getJson(store, "/zarr.json");
+    expect(virtual.zarr_format).toBe(3);
+    expect(virtual.node_type).toBe("group");
   });
 
-  test("column-order matches zarr", async () => {
-    const virtual = await getJson(store, "/.zattrs");
-    const actual = await zarrAttrs(".zattrs");
-    expect(virtual["column-order"]).toEqual(actual["column-order"]);
+  test("attributes encoding-type and encoding-version match zarr", async () => {
+    const virtual = await getJson(store, "/zarr.json");
+    const actual = await zarrMeta("zarr.json");
+    const vAttrs = virtual.attributes as Record<string, unknown>;
+    const aAttrs = actual.attributes as Record<string, unknown>;
+    expect(vAttrs["encoding-type"]).toBe(aAttrs["encoding-type"]);
+    expect(vAttrs["encoding-version"]).toBe(aAttrs["encoding-version"]);
   });
 
-  test("_index matches zarr", async () => {
-    const virtual = await getJson(store, "/.zattrs");
-    const actual = await zarrAttrs(".zattrs");
-    expect(virtual["_index"]).toBe(actual["_index"]);
+  test("attributes column-order matches zarr", async () => {
+    const virtual = await getJson(store, "/zarr.json");
+    const actual = await zarrMeta("zarr.json");
+    const vAttrs = virtual.attributes as Record<string, unknown>;
+    const aAttrs = actual.attributes as Record<string, unknown>;
+    expect(vAttrs["column-order"]).toEqual(aAttrs["column-order"]);
   });
-});
 
-describe("/.zgroup", () => {
-  test("zarr_format is 2", async () => {
-    const virtual = await getJson(store, "/.zgroup");
-    expect(virtual.zarr_format).toBe(2);
+  test("attributes _index matches zarr", async () => {
+    const virtual = await getJson(store, "/zarr.json");
+    const actual = await zarrMeta("zarr.json");
+    const vAttrs = virtual.attributes as Record<string, unknown>;
+    const aAttrs = actual.attributes as Record<string, unknown>;
+    expect(vAttrs["_index"]).toBe(aAttrs["_index"]);
   });
 });
 
 describe("numeric column n_counts", () => {
-  test(".zattrs encoding-type matches zarr", async () => {
-    const virtual = await getJson(store, "/n_counts/.zattrs");
-    const actual = await zarrAttrs("n_counts/.zattrs");
-    expect(virtual["encoding-type"]).toBe(actual["encoding-type"]);
+  test("zarr.json data_type matches zarr", async () => {
+    const virtual = await getJson(store, "/n_counts/zarr.json");
+    const actual = await zarrMeta("n_counts/zarr.json");
+    expect(virtual.data_type).toBe(actual.data_type);
   });
 
-  test(".zarray dtype matches zarr", async () => {
-    const virtual = await getJson(store, "/n_counts/.zarray");
-    const actual = await zarrAttrs("n_counts/.zarray");
-    expect(virtual.dtype).toBe(actual.dtype);
+  test("zarr.json zarr_format is 3 and node_type is array", async () => {
+    const virtual = await getJson(store, "/n_counts/zarr.json");
+    expect(virtual.zarr_format).toBe(3);
+    expect(virtual.node_type).toBe("array");
   });
 
-  test(".zarray zarr_format is 2", async () => {
-    const virtual = await getJson(store, "/n_counts/.zarray");
-    expect(virtual.zarr_format).toBe(2);
-  });
-
-  test(".zarray shape covers all rows", async () => {
-    const virtual = await getJson(store, "/n_counts/.zarray");
+  test("zarr.json shape covers all rows", async () => {
+    const virtual = await getJson(store, "/n_counts/zarr.json");
     const numRows = parquetMeta.row_groups.reduce(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (s: number, rg: any) => s + Number(rg.num_rows),
@@ -118,95 +119,123 @@ describe("numeric column n_counts", () => {
     const shape = virtual.shape as number[];
     expect(shape[0]).toBe(numRows);
   });
+
+  test("zarr.json attributes encoding-type matches zarr", async () => {
+    const virtual = await getJson(store, "/n_counts/zarr.json");
+    const actual = await zarrMeta("n_counts/zarr.json");
+    const vAttrs = virtual.attributes as Record<string, unknown>;
+    const aAttrs = actual.attributes as Record<string, unknown>;
+    expect(vAttrs["encoding-type"]).toBe(aAttrs["encoding-type"]);
+  });
+
+  test("zarr.json codecs include bytes with little endian", async () => {
+    const virtual = await getJson(store, "/n_counts/zarr.json");
+    const codecs = virtual.codecs as Array<Record<string, unknown>>;
+    const bytesCodec = codecs.find((c) => c.name === "bytes");
+    expect(bytesCodec).toBeDefined();
+    expect((bytesCodec!.configuration as Record<string, unknown>)?.endian).toBe("little");
+  });
 });
 
 describe("numeric column n_genes", () => {
-  test(".zattrs encoding-type matches zarr", async () => {
-    const virtual = await getJson(store, "/n_genes/.zattrs");
-    const actual = await zarrAttrs("n_genes/.zattrs");
-    expect(virtual["encoding-type"]).toBe(actual["encoding-type"]);
+  test("zarr.json data_type matches zarr", async () => {
+    const virtual = await getJson(store, "/n_genes/zarr.json");
+    const actual = await zarrMeta("n_genes/zarr.json");
+    expect(virtual.data_type).toBe(actual.data_type);
   });
 
-  test(".zarray dtype matches zarr", async () => {
-    const virtual = await getJson(store, "/n_genes/.zarray");
-    const actual = await zarrAttrs("n_genes/.zarray");
-    expect(virtual.dtype).toBe(actual.dtype);
+  test("zarr.json attributes encoding-type matches zarr", async () => {
+    const virtual = await getJson(store, "/n_genes/zarr.json");
+    const actual = await zarrMeta("n_genes/zarr.json");
+    const vAttrs = virtual.attributes as Record<string, unknown>;
+    const aAttrs = actual.attributes as Record<string, unknown>;
+    expect(vAttrs["encoding-type"]).toBe(aAttrs["encoding-type"]);
   });
 });
 
 describe("index column obs_id", () => {
-  test(".zattrs encoding-type matches zarr", async () => {
-    const virtual = await getJson(store, "/obs_id/.zattrs");
-    const actual = await zarrAttrs("obs_id/.zattrs");
-    expect(virtual["encoding-type"]).toBe(actual["encoding-type"]);
+  test("zarr.json data_type matches zarr", async () => {
+    const virtual = await getJson(store, "/obs_id/zarr.json");
+    const actual = await zarrMeta("obs_id/zarr.json");
+    expect(virtual.data_type).toBe(actual.data_type);
   });
 
-  test(".zarray dtype matches zarr", async () => {
-    const virtual = await getJson(store, "/obs_id/.zarray");
-    const actual = await zarrAttrs("obs_id/.zarray");
-    expect(virtual.dtype).toBe(actual.dtype);
+  test("zarr.json attributes encoding-type matches zarr", async () => {
+    const virtual = await getJson(store, "/obs_id/zarr.json");
+    const actual = await zarrMeta("obs_id/zarr.json");
+    const vAttrs = virtual.attributes as Record<string, unknown>;
+    const aAttrs = actual.attributes as Record<string, unknown>;
+    expect(vAttrs["encoding-type"]).toBe(aAttrs["encoding-type"]);
+  });
+
+  test("zarr.json codecs include vlen-utf8", async () => {
+    const virtual = await getJson(store, "/obs_id/zarr.json");
+    const codecs = virtual.codecs as Array<Record<string, unknown>>;
+    expect(codecs.some((c) => c.name === "vlen-utf8")).toBe(true);
   });
 });
 
 describe("categorical column cell_type", () => {
-  test(".zattrs encoding-type matches zarr", async () => {
-    const virtual = await getJson(store, "/cell_type/.zattrs");
-    const actual = await zarrAttrs("cell_type/.zattrs");
-    expect(virtual["encoding-type"]).toBe(actual["encoding-type"]);
-    expect(virtual["encoding-version"]).toBe(actual["encoding-version"]);
+  test("zarr.json is a group with categorical encoding-type", async () => {
+    const virtual = await getJson(store, "/cell_type/zarr.json");
+    const actual = await zarrMeta("cell_type/zarr.json");
+    expect(virtual.node_type).toBe("group");
+    const vAttrs = virtual.attributes as Record<string, unknown>;
+    const aAttrs = actual.attributes as Record<string, unknown>;
+    expect(vAttrs["encoding-type"]).toBe(aAttrs["encoding-type"]);
+    expect(vAttrs["encoding-version"]).toBe(aAttrs["encoding-version"]);
   });
 
-  test(".zattrs ordered matches zarr", async () => {
-    const virtual = await getJson(store, "/cell_type/.zattrs");
-    const actual = await zarrAttrs("cell_type/.zattrs");
-    expect(virtual.ordered).toBe(actual.ordered);
+  test("zarr.json attributes ordered matches zarr", async () => {
+    const virtual = await getJson(store, "/cell_type/zarr.json");
+    const actual = await zarrMeta("cell_type/zarr.json");
+    const vAttrs = virtual.attributes as Record<string, unknown>;
+    const aAttrs = actual.attributes as Record<string, unknown>;
+    expect(vAttrs.ordered).toBe(aAttrs.ordered);
   });
 
-  test(".zgroup zarr_format is 2", async () => {
-    const virtual = await getJson(store, "/cell_type/.zgroup");
-    expect(virtual.zarr_format).toBe(2);
+  test("codes zarr.json data_type matches zarr", async () => {
+    const virtual = await getJson(store, "/cell_type/codes/zarr.json");
+    const actual = await zarrMeta("cell_type/codes/zarr.json");
+    expect(virtual.data_type).toBe(actual.data_type);
   });
 
-  test("codes .zarray dtype matches zarr", async () => {
-    const virtual = await getJson(store, "/cell_type/codes/.zarray");
-    const actual = await zarrAttrs("cell_type/codes/.zarray");
-    expect(virtual.dtype).toBe(actual.dtype);
+  test("codes zarr.json zarr_format is 3", async () => {
+    const virtual = await getJson(store, "/cell_type/codes/zarr.json");
+    expect(virtual.zarr_format).toBe(3);
   });
 
-  test("codes .zarray zarr_format is 2", async () => {
-    const virtual = await getJson(store, "/cell_type/codes/.zarray");
-    expect(virtual.zarr_format).toBe(2);
+  test("categories zarr.json data_type matches zarr", async () => {
+    const virtual = await getJson(store, "/cell_type/categories/zarr.json");
+    const actual = await zarrMeta("cell_type/categories/zarr.json");
+    expect(virtual.data_type).toBe(actual.data_type);
   });
 
-  test("categories .zarray dtype matches zarr", async () => {
-    const virtual = await getJson(store, "/cell_type/categories/.zarray");
-    const actual = await zarrAttrs("cell_type/categories/.zarray");
-    expect(virtual.dtype).toBe(actual.dtype);
-  });
-
-  test("categories .zarray shape matches zarr", async () => {
-    const virtual = await getJson(store, "/cell_type/categories/.zarray");
-    const actual = await zarrAttrs("cell_type/categories/.zarray");
+  test("categories zarr.json shape matches zarr", async () => {
+    const virtual = await getJson(store, "/cell_type/categories/zarr.json");
+    const actual = await zarrMeta("cell_type/categories/zarr.json");
     expect(virtual.shape).toEqual(actual.shape);
   });
 });
 
 describe("categorical column leiden", () => {
-  test(".zattrs encoding-type matches zarr", async () => {
-    const virtual = await getJson(store, "/leiden/.zattrs");
-    const actual = await zarrAttrs("leiden/.zattrs");
-    expect(virtual["encoding-type"]).toBe(actual["encoding-type"]);
+  test("zarr.json attributes encoding-type matches zarr", async () => {
+    const virtual = await getJson(store, "/leiden/zarr.json");
+    const actual = await zarrMeta("leiden/zarr.json");
+    const vAttrs = virtual.attributes as Record<string, unknown>;
+    const aAttrs = actual.attributes as Record<string, unknown>;
+    expect(vAttrs["encoding-type"]).toBe(aAttrs["encoding-type"]);
   });
 
-  test("codes .zarray dtype matches zarr", async () => {
-    const virtual = await getJson(store, "/leiden/codes/.zarray");
-    const actual = await zarrAttrs("leiden/codes/.zarray");
-    expect(virtual.dtype).toBe(actual.dtype);
+  test("codes zarr.json data_type matches zarr", async () => {
+    const virtual = await getJson(store, "/leiden/codes/zarr.json");
+    const actual = await zarrMeta("leiden/codes/zarr.json");
+    expect(virtual.data_type).toBe(actual.data_type);
   });
 
-  test("categories .zarray shape matches zarr", async () => {
-    const virtual = await getJson(store, "/leiden/categories/.zarray");
-    const actual = await zarrAttrs("leiden/categories/.zarray");
+  test("categories zarr.json shape matches zarr", async () => {
+    const virtual = await getJson(store, "/leiden/categories/zarr.json");
+    const actual = await zarrMeta("leiden/categories/zarr.json");
     expect(virtual.shape).toEqual(actual.shape);
   });
 });
@@ -216,10 +245,9 @@ describe("categorical column leiden", () => {
 describe("n_counts array data", () => {
   test("all row groups values match parquet", async () => {
     const numRgs = parquetMeta.row_groups.length;
-    // Collect all values from virtual store
     const virtualValues: number[] = [];
     for (let rg = 0; rg < numRgs; rg++) {
-      const bytes = await store.get(`/n_counts/${rg}` as `/${string}`);
+      const bytes = await store.get(`/n_counts/c/${rg}` as `/${string}`);
       expect(bytes).toBeDefined();
       const floats = new Float32Array(
         bytes!.buffer,
@@ -228,7 +256,6 @@ describe("n_counts array data", () => {
       );
       virtualValues.push(...Array.from(floats));
     }
-    // Read full column from parquet
     const rows = (await parquetReadObjects({
       file: asyncBuf,
       metadata: parquetMeta,
@@ -244,7 +271,7 @@ describe("n_genes array data", () => {
     const numRgs = parquetMeta.row_groups.length;
     const virtualValues: number[] = [];
     for (let rg = 0; rg < numRgs; rg++) {
-      const bytes = await store.get(`/n_genes/${rg}` as `/${string}`);
+      const bytes = await store.get(`/n_genes/c/${rg}` as `/${string}`);
       expect(bytes).toBeDefined();
       const ints = new Int32Array(
         bytes!.buffer,
@@ -268,7 +295,7 @@ describe("obs_id string array data", () => {
     const numRgs = parquetMeta.row_groups.length;
     const virtualValues: string[] = [];
     for (let rg = 0; rg < numRgs; rg++) {
-      const bytes = await store.get(`/obs_id/${rg}` as `/${string}`);
+      const bytes = await store.get(`/obs_id/c/${rg}` as `/${string}`);
       expect(bytes).toBeDefined();
       virtualValues.push(...decodeVlenUtf8(bytes!));
     }
@@ -284,7 +311,7 @@ describe("obs_id string array data", () => {
 
 describe("cell_type categorical data", () => {
   test("categories are sorted unique values from parquet", async () => {
-    const bytes = await store.get("/cell_type/categories/0");
+    const bytes = await store.get("/cell_type/categories/c/0");
     expect(bytes).toBeDefined();
     const virtualCategories = decodeVlenUtf8(bytes!);
 
@@ -298,14 +325,14 @@ describe("cell_type categorical data", () => {
   });
 
   test("codes round-trip back to original string values", async () => {
-    const catBytes = await store.get("/cell_type/categories/0");
+    const catBytes = await store.get("/cell_type/categories/c/0");
     expect(catBytes).toBeDefined();
     const categories = decodeVlenUtf8(catBytes!);
 
     const numRgs = parquetMeta.row_groups.length;
     const decoded: string[] = [];
     for (let rg = 0; rg < numRgs; rg++) {
-      const bytes = await store.get(`/cell_type/codes/${rg}` as `/${string}`);
+      const bytes = await store.get(`/cell_type/codes/c/${rg}` as `/${string}`);
       expect(bytes).toBeDefined();
       const codes = new Int8Array(bytes!.buffer, bytes!.byteOffset, bytes!.byteLength);
       for (const code of codes) {
@@ -325,7 +352,7 @@ describe("cell_type categorical data", () => {
 
 describe("leiden categorical data", () => {
   test("categories are sorted unique values from parquet", async () => {
-    const bytes = await store.get("/leiden/categories/0");
+    const bytes = await store.get("/leiden/categories/c/0");
     expect(bytes).toBeDefined();
     const virtualCategories = decodeVlenUtf8(bytes!);
 
@@ -339,14 +366,14 @@ describe("leiden categorical data", () => {
   });
 
   test("codes round-trip back to original string values", async () => {
-    const catBytes = await store.get("/leiden/categories/0");
+    const catBytes = await store.get("/leiden/categories/c/0");
     expect(catBytes).toBeDefined();
     const categories = decodeVlenUtf8(catBytes!);
 
     const numRgs = parquetMeta.row_groups.length;
     const decoded: string[] = [];
     for (let rg = 0; rg < numRgs; rg++) {
-      const bytes = await store.get(`/leiden/codes/${rg}` as `/${string}`);
+      const bytes = await store.get(`/leiden/codes/c/${rg}` as `/${string}`);
       expect(bytes).toBeDefined();
       const codes = new Int8Array(bytes!.buffer, bytes!.byteOffset, bytes!.byteLength);
       for (const code of codes) {
@@ -366,32 +393,117 @@ describe("leiden categorical data", () => {
 
 describe("getRange", () => {
   test("offset+length slice of a numeric chunk is correct", async () => {
-    // get the full chunk first, then compare to getRange
-    const full = await store.get("/n_counts/0");
+    const full = await store.get("/n_counts/c/0");
     expect(full).toBeDefined();
-    // read bytes 4..12 (floats at index 1 and 2)
-    const ranged = await store.getRange("/n_counts/0", { offset: 4, length: 8 });
+    const ranged = await store.getRange("/n_counts/c/0", { offset: 4, length: 8 });
     expect(ranged).toBeDefined();
     expect(Array.from(ranged!)).toEqual(Array.from(full!.slice(4, 12)));
   });
 
   test("undefined key returns undefined from getRange", async () => {
-    const result = await store.getRange("/nonexistent/0", { offset: 0, length: 4 });
+    const result = await store.getRange("/nonexistent/c/0", { offset: 0, length: 4 });
     expect(result).toBeUndefined();
+  });
+});
+
+// ── consolidated metadata tests ─────────────────────────────────────────────
+
+describe("consolidated metadata", () => {
+  test("has correct top-level structure", async () => {
+    const consolidated = await store.getConsolidatedMetadata();
+    expect(consolidated.zarr_format).toBe(3);
+    expect(consolidated.node_type).toBe("group");
+    expect(consolidated.consolidated_metadata).toBeDefined();
+    const cm = consolidated.consolidated_metadata as Record<string, unknown>;
+    expect(cm.kind).toBe("inline");
+    expect(cm.must_understand).toBe(false);
+    expect(cm.metadata).toBeDefined();
+  });
+
+  test("attributes match ground-truth zarr.json", async () => {
+    const consolidated = await store.getConsolidatedMetadata();
+    const actual = await zarrMeta("zarr.json");
+    const vAttrs = consolidated.attributes as Record<string, unknown>;
+    const aAttrs = actual.attributes as Record<string, unknown>;
+    expect(vAttrs["column-order"]).toEqual(aAttrs["column-order"]);
+    expect(vAttrs["_index"]).toBe(aAttrs["_index"]);
+    expect(vAttrs["encoding-type"]).toBe(aAttrs["encoding-type"]);
+    expect(vAttrs["encoding-version"]).toBe(aAttrs["encoding-version"]);
+  });
+
+  test("lists all expected metadata keys", async () => {
+    const consolidated = await store.getConsolidatedMetadata();
+    const cm = consolidated.consolidated_metadata as Record<string, Record<string, unknown>>;
+    const keys = Object.keys(cm.metadata).sort();
+    expect(keys).toEqual([
+      "cell_type",
+      "cell_type/categories",
+      "cell_type/codes",
+      "leiden",
+      "leiden/categories",
+      "leiden/codes",
+      "n_counts",
+      "n_genes",
+      "obs_id",
+    ]);
+  });
+
+  test("numeric column metadata has correct data_type", async () => {
+    const consolidated = await store.getConsolidatedMetadata();
+    const cm = consolidated.consolidated_metadata as Record<string, Record<string, Record<string, unknown>>>;
+    const nCounts = cm.metadata["n_counts"];
+    expect(nCounts.node_type).toBe("array");
+    expect(nCounts.data_type).toBe("float32");
+  });
+
+  test("categorical group has consolidated_metadata with empty metadata", async () => {
+    const consolidated = await store.getConsolidatedMetadata();
+    const cm = consolidated.consolidated_metadata as Record<string, Record<string, Record<string, unknown>>>;
+    const cellType = cm.metadata["cell_type"];
+    expect(cellType.node_type).toBe("group");
+    const innerCm = cellType.consolidated_metadata as Record<string, unknown>;
+    expect(innerCm.kind).toBe("inline");
+    expect(innerCm.metadata).toEqual({});
+  });
+
+  test("categorical codes metadata has correct data_type", async () => {
+    const consolidated = await store.getConsolidatedMetadata();
+    const cm = consolidated.consolidated_metadata as Record<string, Record<string, Record<string, unknown>>>;
+    const codes = cm.metadata["cell_type/codes"];
+    expect(codes.node_type).toBe("array");
+    expect(codes.data_type).toBe("int8");
+  });
+
+  test("categorical categories metadata has correct data_type and shape", async () => {
+    const consolidated = await store.getConsolidatedMetadata();
+    const cm = consolidated.consolidated_metadata as Record<string, Record<string, Record<string, unknown>>>;
+    const cats = cm.metadata["cell_type/categories"];
+    expect(cats.node_type).toBe("array");
+    expect(cats.data_type).toBe("string");
+    expect(cats.shape).toEqual([3]);
+  });
+
+  test("string index column metadata has correct data_type", async () => {
+    const consolidated = await store.getConsolidatedMetadata();
+    const cm = consolidated.consolidated_metadata as Record<string, Record<string, Record<string, unknown>>>;
+    const obsId = cm.metadata["obs_id"];
+    expect(obsId.node_type).toBe("array");
+    expect(obsId.data_type).toBe("string");
   });
 });
 
 describe("unknown keys return undefined", () => {
   test("unknown column", async () => {
-    expect(await store.get("/nonexistent/.zattrs")).toBeUndefined();
+    expect(await store.get("/nonexistent/zarr.json")).toBeUndefined();
   });
 
   test("unknown subkey", async () => {
-    expect(await store.get("/n_counts/.zgroup")).toBeUndefined();
+    // non-categorical column shouldn't have a group-like subpath
+    expect(await store.get("/n_counts/codes/zarr.json")).toBeUndefined();
   });
 
   test("out-of-range row group", async () => {
     const numRgs = parquetMeta.row_groups.length;
-    expect(await store.get(`/n_counts/${numRgs}` as `/${string}`)).toBeUndefined();
+    expect(await store.get(`/n_counts/c/${numRgs}` as `/${string}`)).toBeUndefined();
   });
 });

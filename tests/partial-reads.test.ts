@@ -131,34 +131,30 @@ beforeAll(async () => {
 // ── tests ──────────────────────────────────────────────────────────────────
 
 describe("init phase", () => {
-  test("reading /.zattrs makes at least one getRange call (parquet footer)", async () => {
+  test("reading /zarr.json makes at least one getRange call (parquet footer)", async () => {
     const spy = makeStoreSpy();
-    await store(spy).get("/.zattrs");
+    await store(spy).get("/zarr.json");
     expect(spy.fetchCalls.length).toBeGreaterThan(0);
   });
 
   test("get() is never called — init uses only getRange", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
-    // Read various chunk keys to exercise column reads
-    await s.get("/n_counts/0");
-    await s.get("/cell_type/categories/0");
+    await s.get("/zarr.json");
+    await s.get("/n_counts/c/0");
+    await s.get("/cell_type/categories/c/0");
     expect(spy.getCalls).toBe(0);
   });
 
   test("init is memoised: pure schema keys make no new getRange calls", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
+    await s.get("/zarr.json");
     const callsAfterInit = spy.fetchCalls.length;
 
     // These keys are derived entirely from the already-parsed parquet footer.
-    await s.get("/.zgroup");
-    await s.get("/n_counts/.zattrs");
-    await s.get("/n_counts/.zarray");
-    await s.get("/cell_type/.zattrs");
-    await s.get("/cell_type/.zgroup");
+    await s.get("/n_counts/zarr.json");
+    await s.get("/cell_type/zarr.json");
 
     expect(spy.fetchCalls.length).toBe(callsAfterInit);
   });
@@ -168,11 +164,11 @@ describe("numeric column chunk reads", () => {
   test("each row group read adds exactly one getRange call", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs"); // trigger init
+    await s.get("/zarr.json"); // trigger init
 
     for (let rg = 0; rg < numRgs; rg++) {
       const before = spy.fetchCalls.length;
-      await s.get(`/n_counts/${rg}` as AbsolutePath);
+      await s.get(`/n_counts/c/${rg}` as AbsolutePath);
       expect(spy.fetchCalls.length - before).toBe(1);
     }
   });
@@ -180,11 +176,11 @@ describe("numeric column chunk reads", () => {
   test("each getRange call targets exactly the column's row-group byte range", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
+    await s.get("/zarr.json");
 
     for (let rg = 0; rg < numRgs; rg++) {
       const before = spy.fetchCalls.length;
-      await s.get(`/n_counts/${rg}` as AbsolutePath);
+      await s.get(`/n_counts/c/${rg}` as AbsolutePath);
       const [call] = spy.fetchCalls.slice(before);
       expect(call).toEqual(colByteRange(parquetMeta, rg, "n_counts"));
     }
@@ -193,10 +189,10 @@ describe("numeric column chunk reads", () => {
   test("reading row group 0 does not fetch bytes belonging to row groups 1-3", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
+    await s.get("/zarr.json");
 
     const before = spy.fetchCalls.length;
-    await s.get("/n_counts/0");
+    await s.get("/n_counts/c/0");
     const [call] = spy.fetchCalls.slice(before);
 
     for (let rg = 1; rg < numRgs; rg++) {
@@ -210,11 +206,11 @@ describe("numeric column chunk reads", () => {
   test("different columns in the same row group are fetched independently", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
+    await s.get("/zarr.json");
 
     const before = spy.fetchCalls.length;
-    await s.get("/n_counts/0");
-    await s.get("/n_genes/0");
+    await s.get("/n_counts/c/0");
+    await s.get("/n_genes/c/0");
     const newCalls = spy.fetchCalls.slice(before);
 
     expect(newCalls.length).toBe(2);
@@ -225,11 +221,11 @@ describe("numeric column chunk reads", () => {
   test("column chunk reads are a small fraction of the file (<10% each)", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
+    await s.get("/zarr.json");
 
     for (let rg = 0; rg < numRgs; rg++) {
       const before = spy.fetchCalls.length;
-      await s.get(`/n_counts/${rg}` as AbsolutePath);
+      await s.get(`/n_counts/c/${rg}` as AbsolutePath);
       const [call] = spy.fetchCalls.slice(before);
       expect(call.length / spy.fileSize).toBeLessThan(0.1);
     }
@@ -240,11 +236,11 @@ describe("string index column chunk reads", () => {
   test("each obs_id row group read adds exactly one targeted getRange call", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
+    await s.get("/zarr.json");
 
     for (let rg = 0; rg < numRgs; rg++) {
       const before = spy.fetchCalls.length;
-      await s.get(`/obs_id/${rg}` as AbsolutePath);
+      await s.get(`/obs_id/c/${rg}` as AbsolutePath);
       const [call] = spy.fetchCalls.slice(before);
       expect(spy.fetchCalls.length - before).toBe(1);
       expect(call).toEqual(colByteRange(parquetMeta, rg, "obs_id"));
@@ -256,25 +252,24 @@ describe("categorical column chunk reads", () => {
   test("categories are fetched once then cached; second access makes no new getRange calls", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
+    await s.get("/zarr.json");
 
-    await s.get("/cell_type/categories/0");
+    await s.get("/cell_type/categories/c/0");
     const callsAfterFirst = spy.fetchCalls.length;
 
-    await s.get("/cell_type/categories/0");
+    await s.get("/cell_type/categories/c/0");
     expect(spy.fetchCalls.length).toBe(callsAfterFirst);
   });
 
   test("category getRange calls are scoped to only the categorical column bytes", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
+    await s.get("/zarr.json");
     const afterInit = spy.fetchCalls.length;
 
-    await s.get("/cell_type/categories/0");
+    await s.get("/cell_type/categories/c/0");
     const newCalls = spy.fetchCalls.slice(afterInit);
 
-    // Every new call must fall within a cell_type row-group byte range
     const cellTypeRanges = Array.from({ length: numRgs }, (_, rg) =>
       colByteRange(parquetMeta, rg, "cell_type"),
     );
@@ -291,13 +286,12 @@ describe("categorical column chunk reads", () => {
   test("category reads do not touch unrelated columns (n_counts)", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
+    await s.get("/zarr.json");
     const afterInit = spy.fetchCalls.length;
 
-    await s.get("/cell_type/categories/0");
+    await s.get("/cell_type/categories/c/0");
     const newCalls = spy.fetchCalls.slice(afterInit);
 
-    // n_counts bytes should not overlap with any category read
     for (let rg = 0; rg < numRgs; rg++) {
       const nc = colByteRange(parquetMeta, rg, "n_counts");
       const ncEnd = nc.offset + nc.length;
@@ -314,18 +308,16 @@ describe("unique bytes fraction", () => {
   test("reading one numeric column across all row groups fetches only those column bytes", async () => {
     const spy = makeStoreSpy();
     const s = store(spy);
-    await s.get("/.zattrs");
+    await s.get("/zarr.json");
 
     for (let rg = 0; rg < numRgs; rg++) {
-      await s.get(`/n_counts/${rg}` as AbsolutePath);
+      await s.get(`/n_counts/c/${rg}` as AbsolutePath);
     }
 
-    // Full file is never requested — all reads are targeted getRange calls.
     expect(spy.getCalls).toBe(0);
 
     const totalBytes = spy.fetchCalls.reduce((sum, c) => sum + c.length, 0);
 
-    // Footer init: 8-byte tail read + (metadataLength + 8)-byte footer read.
     const raw = readFileSync(PARQUET_PATH);
     const tailView = new DataView(raw.buffer, raw.byteOffset + raw.byteLength - 8, 8);
     const metadataLength = tailView.getUint32(0, true);
@@ -333,7 +325,6 @@ describe("unique bytes fraction", () => {
 
     const columnBytes = numRgs * colByteRange(parquetMeta, 0, "n_counts").length;
     expect(totalBytes).toBe(footerBytes + columnBytes);
-    // And the column bytes alone are a small fraction of the file
     expect(columnBytes / spy.fileSize).toBeLessThan(0.15);
   });
 });

@@ -32,7 +32,7 @@
 </head>
 <body>
   <h1>Parquet as Virtual Zarr</h1>
-  <p class="subtitle">Select or drop a <code>.parquet</code> file (or a directory containing one) to view its virtual Zarr <code>/.zattrs</code>.</p>
+  <p class="subtitle">Select or drop a <code>.parquet</code> file (or a directory containing one) to view its virtual Zarr v3 <code>/zarr.json</code>.</p>
 
   <div id="drop-zone">
     <div class="file-inputs">
@@ -50,6 +50,9 @@
 
   <p id="status"></p>
   <pre id="output"></pre>
+
+  <h2 id="consolidated-heading" style="display:none; margin-top:1.5rem;">Consolidated Metadata</h2>
+  <pre id="consolidated-output" style="display:none; background:#f6f8fa; border:1px solid #ddd; border-radius:4px; padding:1rem; overflow:auto; max-height:70vh; font-size:0.85rem; white-space:pre-wrap; word-break:break-all;"></pre>
 
   <script type="module" src="./demo/main.js"></script>
 </body>

@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import zarr
 
 # Pandas 3.x defaults to Arrow-backed strings, which anndata's zarr writer does not support.
 # Force numpy-backed object strings throughout.
@@ -54,12 +55,30 @@ def write_parquet(obs: pd.DataFrame, path: str, row_group_size: int) -> None:
     print(f"  rows={meta.num_rows}  row_groups={meta.num_row_groups}  columns={meta.num_columns}")
 
 
+def write_parquet_multipart(obs: pd.DataFrame, path: str, row_group_size: int) -> None:
+    """Write a multi-part parquet directory with one part file per row group."""
+    if os.path.exists(path):
+        shutil.rmtree(path)
+    os.makedirs(path)
+    table = pa.Table.from_pandas(obs)
+    part_index = 0
+    for i in range(0, len(obs), row_group_size):
+        part_table = table.slice(i, min(row_group_size, len(obs) - i))
+        part_path = os.path.join(path, f"part.{part_index}.parquet")
+        pq.write_table(part_table, part_path, row_group_size=row_group_size)
+        part_index += 1
+    print(f"Wrote multi-part Parquet: {path}")
+    print(f"  parts={part_index}  rows_per_part={row_group_size}")
+
+
 def write_zarr(obs: pd.DataFrame, path: str, row_group_size: int) -> None:
     if os.path.exists(path):
         shutil.rmtree(path)
+    ad.settings.zarr_write_format = 3
     adata = ad.AnnData(obs=obs)
-    adata.write_zarr(path, chunks=[row_group_size])
-    print(f"Wrote AnnData-Zarr: {path}")
+    adata.write_zarr(path, chunks=row_group_size)
+    zarr.consolidate_metadata(path + "/obs")
+    print(f"Wrote AnnData-Zarr (v3): {path}")
     print(f"  obs dataframe at: {path}/obs/")
     print(f"  columns: {list(obs.columns)}")
 
@@ -83,6 +102,9 @@ def main() -> None:
 
     parquet_path = os.path.join(args.output_dir, "obs.parquet")
     write_parquet(obs, parquet_path, args.row_group_size)
+
+    parquet_multipart_path = os.path.join(args.output_dir, "obs_multipart")
+    write_parquet_multipart(obs, parquet_multipart_path, args.row_group_size)
 
     zarr_path = os.path.join(args.output_dir, "adata.zarr")
     write_zarr(obs, zarr_path, args.row_group_size)
