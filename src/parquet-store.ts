@@ -1,12 +1,17 @@
 // @ts-ignore - hyparquet is a JS package; types generated on build
-import { parquetMetadata, parquetRead } from "hyparquet";
+import { parquetMetadata } from "hyparquet";
 import type { AsyncReadable, AbsolutePath, RangeQuery } from "@zarrita/storage";
+import {
+  isZeroCopyEligible,
+  extractZeroCopyPageData,
+  readColumnChunkData,
+} from "./vendored/parquet-column.js";
+// Side-effect import: registers the snappy codec with zarrita's registry
+import "./snappy-codec.js";
 
 interface PartInfo {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   metadata: any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  asyncBuffer: any;
   /** Key used to read this part from the inner store. */
   storeKey: string;
 }
@@ -40,13 +45,17 @@ interface RgMapping {
 export class ParquetAsAnnDataFrameStore implements AsyncReadable {
   readonly #store: AsyncReadable;
   #initialized = false;
-  /** Per-part parquet metadata and async buffers. */
+  /** Per-part parquet metadata and store keys. */
   #parts: PartInfo[] = [];
   /** Maps global row group index → part and local row group index. */
   #rgMap: RgMapping[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   #pandasMeta: any = null;
   #categoriesCache = new Map<string, string[]>();
+  /** Cache of which columns use zero-copy snappy pass-through. */
+  #zeroCopySnappyCols = new Set<string>();
+  /** Cache of which columns use zero-copy uncompressed pass-through. */
+  #zeroCopyRawCols = new Set<string>();
 
   constructor(store: AsyncReadable) {
     this.#store = store;
@@ -57,9 +66,8 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
   }
 
   /**
-   * Read the parquet footer for a given store key and return parsed metadata +
-   * an AsyncBuffer for column reads. Returns null if the key is not a valid
-   * parquet file.
+   * Read the parquet footer for a given store key and return parsed metadata.
+   * Returns null if the key is not a valid parquet file.
    */
   async #readParquetFooter(storeKey: string): Promise<PartInfo | null> {
     if (!this.#store.getRange) {
@@ -91,31 +99,12 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
 
     const metadata = parquetMetadata(footerBuf);
 
-    const asyncBuffer = {
-      byteLength: Number.MAX_SAFE_INTEGER,
-      slice: async (start: number, end?: number): Promise<ArrayBuffer> => {
-        if (end === undefined) {
-          throw new Error("ParquetAsAnnDataFrameStore: unbounded slice — this is a bug");
-        }
-        const length = end - start;
-        if (length <= 0) return new ArrayBuffer(0);
-        const bytes = await this.#store.getRange!(storeKey as AbsolutePath, { offset: start, length });
-        if (!bytes) {
-          throw new Error(`ParquetAsAnnDataFrameStore: getRange returned nothing for key=${storeKey} offset=${start} length=${length}`);
-        }
-        return bytes.buffer.slice(
-          bytes.byteOffset,
-          bytes.byteOffset + bytes.byteLength,
-        ) as ArrayBuffer;
-      },
-    };
-
-    return { metadata, asyncBuffer, storeKey };
+    return { metadata, storeKey };
   }
 
   /**
    * Lazily initialise: detect single-file vs multi-part mode, read parquet
-   * metadata, and build AsyncBuffers for column reads.
+   * metadata, and build the global row group mapping.
    */
   async #init(): Promise<void> {
     if (this.#initialized) return;
@@ -162,7 +151,35 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
       this.#pandasMeta = JSON.parse(pandasKv.value);
     }
 
+    // Determine zero-copy eligibility for each column.
+    this.#detectZeroCopyColumns();
+
     this.#initialized = true;
+  }
+
+  /**
+   * Check each column against zero-copy criteria (REQUIRED + PLAIN + numeric)
+   * and cache the result along with the compression codec.
+   */
+  #detectZeroCopyColumns(): void {
+    const rg0 = this.#parts[0].metadata.row_groups[0];
+    for (const colName of this.#columnNames()) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const schemaElement = this.#schema.find((s: any) => s.name === colName);
+      if (!schemaElement) continue;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const colChunk = rg0.columns.find((c: any) => c.meta_data.path_in_schema[0] === colName);
+      if (!colChunk) continue;
+      const meta = colChunk.meta_data;
+
+      if (isZeroCopyEligible(schemaElement, meta)) {
+        if (meta.codec === "SNAPPY") {
+          this.#zeroCopySnappyCols.add(colName);
+        } else if (meta.codec === "UNCOMPRESSED") {
+          this.#zeroCopyRawCols.add(colName);
+        }
+      }
+    }
   }
 
   /** Schema from first part (all parts share the same schema). */
@@ -222,19 +239,6 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     }
   }
 
-  /** [rowStart, rowEnd) for a given global row group index. */
-  #rowGroupRange(rgIndex: number): [number, number] {
-    const mapping = this.#rgMap[rgIndex];
-    const part = this.#parts[mapping.partIndex];
-    let localStart = 0;
-    for (let i = 0; i < mapping.localRgIndex; i++) {
-      localStart += Number(part.metadata.row_groups[i].num_rows);
-    }
-    const numRows = Number(part.metadata.row_groups[mapping.localRgIndex].num_rows);
-    const globalStart = mapping.partRowOffset + localStart;
-    return [globalStart, globalStart + numRows];
-  }
-
   #totalRows(): number {
     let total = 0;
     for (const part of this.#parts) {
@@ -254,56 +258,71 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     return this.#rgMap.length;
   }
 
+  // ── Column chunk byte reading ─────────────────────────────────────────
+
   /**
-   * Compute the local [rowStart, rowEnd) within a part for a given global row group index.
+   * Get the column metadata for a specific column in a specific row group.
    */
-  #localRowRangeForRg(rgIndex: number): { part: PartInfo; localRowStart: number; localRowEnd: number } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  #getColumnMeta(colName: string, rgIndex: number): { part: PartInfo; meta: any } {
     const mapping = this.#rgMap[rgIndex];
     const part = this.#parts[mapping.partIndex];
-    let localRowStart = 0;
-    for (let i = 0; i < mapping.localRgIndex; i++) {
-      localRowStart += Number(part.metadata.row_groups[i].num_rows);
-    }
-    const localRowEnd = localRowStart + Number(part.metadata.row_groups[mapping.localRgIndex].num_rows);
-    return { part, localRowStart, localRowEnd };
+    const rg = part.metadata.row_groups[mapping.localRgIndex];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const colChunk = rg.columns.find((c: any) => c.meta_data.path_in_schema[0] === colName);
+    return { part, meta: colChunk.meta_data };
   }
 
   /**
-   * Read one column from a specific row group via parquetRead onChunk.
-   * For numeric columns, returns the raw typed array (e.g. Float32Array).
-   * For string columns, returns a plain string array.
+   * Fetch raw column chunk bytes from the underlying store via getRange.
+   * The returned bytes include all page headers and page data for the column chunk.
+   */
+  async #fetchColumnChunkBytes(colName: string, rgIndex: number): Promise<Uint8Array> {
+    const { part, meta } = this.#getColumnMeta(colName, rgIndex);
+    const columnOffset = Number(meta.dictionary_page_offset || meta.data_page_offset);
+    const chunkSize = Number(meta.total_compressed_size);
+    const bytes = await this.#store.getRange!(part.storeKey as AbsolutePath, {
+      offset: columnOffset,
+      length: chunkSize,
+    });
+    if (!bytes) {
+      throw new Error(
+        `ParquetAsAnnDataFrameStore: getRange returned nothing for column=${colName} rg=${rgIndex}`,
+      );
+    }
+    return bytes;
+  }
+
+  /**
+   * Read one column from a specific row group.
+   *
+   * For zero-copy eligible columns (REQUIRED + PLAIN + numeric):
+   *   Returns raw bytes (compressed or uncompressed) with page headers stripped.
+   *   The zarr codec pipeline handles decompression.
+   *
+   * For other columns:
+   *   Decodes the column data using vendored parquet decoding logic.
+   *   Returns typed array for numerics, string array for strings.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async #readColumnChunkForRg(colName: string, rgIndex: number): Promise<any> {
-    const { part, localRowStart, localRowEnd } = this.#localRowRangeForRg(rgIndex);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const chunks: any[] = [];
-    await parquetRead({
-      file: part.asyncBuffer,
-      metadata: part.metadata,
-      columns: [colName],
-      rowStart: localRowStart,
-      rowEnd: localRowEnd,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      onChunk(chunk: any) {
-        chunks.push(chunk.columnData);
-      },
-    });
-    if (chunks.length === 1) return chunks[0];
-    // Multiple pages: concatenate
-    if (ArrayBuffer.isView(chunks[0])) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const Ctor = (chunks[0] as any).constructor as { new (len: number): any };
-      const totalLen = chunks.reduce((s: number, c: { length: number }) => s + c.length, 0);
-      const merged = new Ctor(totalLen);
-      let offset = 0;
-      for (const c of chunks) {
-        merged.set(c, offset);
-        offset += c.length;
+    const rawBytes = await this.#fetchColumnChunkBytes(colName, rgIndex);
+    const { meta } = this.#getColumnMeta(colName, rgIndex);
+
+    // Zero-copy path: return raw page data bytes directly
+    if (this.#zeroCopySnappyCols.has(colName) || this.#zeroCopyRawCols.has(colName)) {
+      const pageData = extractZeroCopyPageData(rawBytes);
+      if (pageData !== null) {
+        return pageData;
       }
-      return merged;
+      // Multi-page fallback: decode normally
     }
-    return chunks.flat();
+
+    // Decode path: use vendored column reader
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const schemaElement = this.#schema.find((s: any) => s.name === colName);
+    const isOptional = schemaElement?.repetition_type !== "REQUIRED";
+    return readColumnChunkData(rawBytes, meta.codec, meta.type, isOptional);
   }
 
   /**
@@ -377,9 +396,14 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     return "<i4";
   }
 
-  #numericCodecs(dataType: string): unknown[] {
-    if (dataType === "int8") return [{ name: "bytes" }];
-    return [{ name: "bytes", configuration: { endian: "little" } }];
+  #numericCodecs(colName: string, dataType: string): unknown[] {
+    const bytesCodec = dataType === "int8"
+      ? { name: "bytes" }
+      : { name: "bytes", configuration: { endian: "little" } };
+    if (this.#zeroCopySnappyCols.has(colName)) {
+      return [bytesCodec, { name: "snappy" }];
+    }
+    return [bytesCodec];
   }
 
   #stringCodecs(): unknown[] {
@@ -413,7 +437,7 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
       chunk_grid: { name: "regular", configuration: { chunk_shape: [maxRowsPerRg] } },
       chunk_key_encoding: { name: "default", configuration: { separator: "/" } },
       fill_value: 0,
-      codecs: this.#numericCodecs(dataType),
+      codecs: this.#numericCodecs(colName, dataType),
       attributes: { "encoding-type": "array", "encoding-version": "0.2.0" },
     };
   }
@@ -459,7 +483,7 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
       chunk_grid: { name: "regular", configuration: { chunk_shape: [maxRowsPerRg] } },
       chunk_key_encoding: { name: "default", configuration: { separator: "/" } },
       fill_value: 0,
-      codecs: this.#numericCodecs(dataType),
+      codecs: this.#numericCodecs(colName, dataType),
       attributes: {},
     };
   }
@@ -569,8 +593,12 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
       const rgIndex = Number(parts[2]);
       if (Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < numRgs) {
         const chunkData = await this.#readColumnChunkForRg(colName, rgIndex);
+        if (chunkData instanceof Uint8Array) {
+          // Zero-copy path or already-encoded bytes — return directly
+          return chunkData;
+        }
         if (ArrayBuffer.isView(chunkData)) {
-          // Typed array from hyparquet (PLAIN-encoded numerics) — return raw bytes
+          // Typed array from decoded numerics — return raw bytes
           const ta = chunkData as ArrayBufferView;
           return new Uint8Array(ta.buffer, ta.byteOffset, ta.byteLength);
         }
