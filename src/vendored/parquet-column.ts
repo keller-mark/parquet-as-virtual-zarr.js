@@ -17,6 +17,7 @@ import {
   readVarInt,
 } from "./thrift.js";
 import { snappyUncompress } from "./snappy.js";
+import { lz4RawDecompress } from "./lz4raw.js";
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -93,11 +94,11 @@ export function parsePageHeader(reader: DataReader): PageHeader {
 
 // ── Decompression ──────────────────────────────────────────────────────
 
-function decompressPage(
+async function decompressPage(
   compressedBytes: Uint8Array,
   uncompressedPageSize: number,
   codec: string,
-): Uint8Array {
+): Promise<Uint8Array> {
   if (codec === "UNCOMPRESSED") {
     return compressedBytes;
   }
@@ -106,7 +107,69 @@ function decompressPage(
     snappyUncompress(compressedBytes, output);
     return output;
   }
+  if (codec === "GZIP") {
+    return decompressGzip(compressedBytes);
+  }
+  if (codec === "ZSTD") {
+    return decompressZstd(compressedBytes, uncompressedPageSize);
+  }
+  if (codec === "LZ4_RAW") {
+    const output = new Uint8Array(uncompressedPageSize);
+    lz4RawDecompress(compressedBytes, output);
+    return output;
+  }
+  if (codec === "BROTLI") {
+    return decompressBrotli(compressedBytes);
+  }
   throw new Error(`parquet unsupported compression codec: ${codec}`);
+}
+
+async function decompressGzip(bytes: Uint8Array): Promise<Uint8Array> {
+  // Use the web-standard DecompressionStream (Node 18+ and browsers)
+  const ds = new DecompressionStream("gzip");
+  const writer = ds.writable.getWriter();
+  const reader = ds.readable.getReader();
+  writer.write(bytes);
+  writer.close();
+  const chunks: Uint8Array[] = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  if (chunks.length === 1) return chunks[0];
+  const totalLen = chunks.reduce((s, c) => s + c.byteLength, 0);
+  const result = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const c of chunks) {
+    result.set(c, offset);
+    offset += c.byteLength;
+  }
+  return result;
+}
+
+async function decompressZstd(
+  bytes: Uint8Array,
+  _uncompressedSize: number,
+): Promise<Uint8Array> {
+  // Use numcodecs/zstd (WASM) — available as a transitive dependency via zarrita
+  const { default: ZstdCodec } = await import("numcodecs/zstd");
+  const codec = ZstdCodec.fromConfig({});
+  return codec.decode(bytes);
+}
+
+async function decompressBrotli(bytes: Uint8Array): Promise<Uint8Array> {
+  // Use Node.js zlib (brotli not available in DecompressionStream)
+  try {
+    const zlib = await import("node:zlib");
+    const result = zlib.brotliDecompressSync(bytes);
+    return new Uint8Array(result.buffer, result.byteOffset, result.byteLength);
+  } catch {
+    throw new Error(
+      "parquet BROTLI decompression requires Node.js zlib module. " +
+        "Brotli is not supported in browser environments without a polyfill.",
+    );
+  }
 }
 
 // ── RLE / Bit-packed hybrid ────────────────────────────────────────────
@@ -365,12 +428,12 @@ export function extractZeroCopyPageData(
  * Handles dictionary-encoded, PLAIN-encoded, and optional (nullable) columns.
  * Returns typed array for numerics, string array for strings.
  */
-export function readColumnChunkData(
+export async function readColumnChunkData(
   rawBytes: Uint8Array,
   codec: string,
   parquetType: string,
   isOptional: boolean,
-): DecodedArray {
+): Promise<DecodedArray> {
   const reader = createReader(rawBytes);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let dictionary: any;
@@ -388,7 +451,7 @@ export function readColumnChunkData(
 
     if (header.type === "DICTIONARY_PAGE") {
       const diph = header.dictionary_page_header!;
-      const page = decompressPage(
+      const page = await decompressPage(
         pageBytes,
         header.uncompressed_page_size,
         codec,
@@ -403,7 +466,7 @@ export function readColumnChunkData(
       }
     } else if (header.type === "DATA_PAGE") {
       const daph = header.data_page_header!;
-      const page = decompressPage(
+      const page = await decompressPage(
         pageBytes,
         header.uncompressed_page_size,
         codec,
@@ -489,7 +552,7 @@ export function readColumnChunkData(
 
       let page: Uint8Array;
       if (daph2.is_compressed !== false) {
-        page = decompressPage(valuesCompressed, uncompressedPageSize, codec);
+        page = await decompressPage(valuesCompressed, uncompressedPageSize, codec);
       } else {
         page = valuesCompressed;
       }

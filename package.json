@@ -17,7 +17,8 @@
     "@uwdata/flechette": "^2.3.0",
     "@zarrita/storage": "^0.1.4",
     "hyparquet": "^1.25.1",
-    "zarrita": "^0.6.1"
+    "zarrita": "^0.6.1",
+    "numcodecs": "^0.3.2"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

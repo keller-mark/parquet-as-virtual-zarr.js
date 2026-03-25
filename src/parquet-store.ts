@@ -5,7 +5,9 @@ import {
   isZeroCopyEligible,
   extractZeroCopyPageData,
   readColumnChunkData,
+  parsePageHeader,
 } from "./vendored/parquet-column.js";
+import { createReader } from "./vendored/thrift.js";
 // Side-effect import: registers the snappy codec with zarrita's registry
 import "./snappy-codec.js";
 
@@ -52,9 +54,13 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   #pandasMeta: any = null;
   #categoriesCache = new Map<string, string[]>();
-  /** Cache of which columns use zero-copy snappy pass-through. */
-  #zeroCopySnappyCols = new Set<string>();
-  /** Cache of which columns use zero-copy uncompressed pass-through. */
+  /**
+   * Maps column name → zarr codec name for zero-copy compressed pass-through.
+   * Only set for columns that are REQUIRED + PLAIN + numeric + compressed.
+   * UNCOMPRESSED zero-copy columns are tracked in #zeroCopyRawCols.
+   */
+  #zeroCopyCompressedCols = new Map<string, string>();
+  /** Columns that use zero-copy uncompressed pass-through. */
   #zeroCopyRawCols = new Set<string>();
 
   constructor(store: AsyncReadable) {
@@ -161,6 +167,15 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
    * Check each column against zero-copy criteria (REQUIRED + PLAIN + numeric)
    * and cache the result along with the compression codec.
    */
+  /** Map parquet compression codec to zarr codec name for zero-copy. */
+  static readonly #PARQUET_TO_ZARR_CODEC: Record<string, string> = {
+    SNAPPY: "snappy",
+    GZIP: "gzip",
+    ZSTD: "zstd",
+    LZ4_RAW: "lz4_raw",
+    BROTLI: "brotli",
+  };
+
   #detectZeroCopyColumns(): void {
     const rg0 = this.#parts[0].metadata.row_groups[0];
     for (const colName of this.#columnNames()) {
@@ -173,10 +188,14 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
       const meta = colChunk.meta_data;
 
       if (isZeroCopyEligible(schemaElement, meta)) {
-        if (meta.codec === "SNAPPY") {
-          this.#zeroCopySnappyCols.add(colName);
-        } else if (meta.codec === "UNCOMPRESSED") {
+        const codec: string = meta.codec;
+        if (codec === "UNCOMPRESSED") {
           this.#zeroCopyRawCols.add(colName);
+        } else {
+          const zarrCodec = ParquetAsAnnDataFrameStore.#PARQUET_TO_ZARR_CODEC[codec];
+          if (zarrCodec) {
+            this.#zeroCopyCompressedCols.set(colName, zarrCodec);
+          }
         }
       }
     }
@@ -310,9 +329,20 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     const { meta } = this.#getColumnMeta(colName, rgIndex);
 
     // Zero-copy path: return raw page data bytes directly
-    if (this.#zeroCopySnappyCols.has(colName) || this.#zeroCopyRawCols.has(colName)) {
+    const zarrCodec = this.#zeroCopyCompressedCols.get(colName);
+    if (zarrCodec || this.#zeroCopyRawCols.has(colName)) {
       const pageData = extractZeroCopyPageData(rawBytes);
       if (pageData !== null) {
+        if (zarrCodec === "lz4_raw") {
+          // LZ4 raw blocks need a size prefix so the zarr codec knows the output size.
+          // Prepend 4-byte LE uncompressed size (from page header).
+          const headerReader = createReader(rawBytes);
+          const header = parsePageHeader(headerReader);
+          const prefixed = new Uint8Array(4 + pageData.byteLength);
+          new DataView(prefixed.buffer).setUint32(0, header.uncompressed_page_size, true);
+          prefixed.set(pageData, 4);
+          return prefixed;
+        }
         return pageData;
       }
       // Multi-page fallback: decode normally
@@ -322,7 +352,7 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const schemaElement = this.#schema.find((s: any) => s.name === colName);
     const isOptional = schemaElement?.repetition_type !== "REQUIRED";
-    return readColumnChunkData(rawBytes, meta.codec, meta.type, isOptional);
+    return await readColumnChunkData(rawBytes, meta.codec, meta.type, isOptional);
   }
 
   /**
@@ -400,8 +430,9 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     const bytesCodec = dataType === "int8"
       ? { name: "bytes" }
       : { name: "bytes", configuration: { endian: "little" } };
-    if (this.#zeroCopySnappyCols.has(colName)) {
-      return [bytesCodec, { name: "snappy" }];
+    const zarrCodec = this.#zeroCopyCompressedCols.get(colName);
+    if (zarrCodec) {
+      return [bytesCodec, { name: zarrCodec }];
     }
     return [bytesCodec];
   }

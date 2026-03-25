@@ -170,11 +170,13 @@ def main() -> None:
     # Generate PLAIN-encoded fixtures for zero-copy testing
     obs_plain = make_obs_plain(args.n_obs, seed=args.seed)
 
-    parquet_plain_snappy_path = os.path.join(args.output_dir, "obs_plain_snappy.parquet")
-    write_parquet_plain(obs_plain, parquet_plain_snappy_path, args.row_group_size, compression="SNAPPY")
-
-    parquet_plain_none_path = os.path.join(args.output_dir, "obs_plain_none.parquet")
-    write_parquet_plain(obs_plain, parquet_plain_none_path, args.row_group_size, compression="NONE")
+    # Generate PLAIN-encoded fixtures for each compression codec.
+    # These have REQUIRED numeric columns so they exercise the zero-copy path.
+    compression_codecs = ["NONE", "SNAPPY", "GZIP", "ZSTD", "LZ4", "BROTLI"]
+    for codec in compression_codecs:
+        suffix = codec.lower()
+        path = os.path.join(args.output_dir, f"obs_plain_{suffix}.parquet")
+        write_parquet_plain(obs_plain, path, args.row_group_size, compression=codec)
 
     zarr_plain_path = os.path.join(args.output_dir, "adata_plain.zarr")
     write_zarr(obs_plain, zarr_plain_path, args.row_group_size)
