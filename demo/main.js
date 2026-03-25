@@ -1,3 +1,4 @@
+import { open, root } from "zarrita";
 import { ParquetAsAnnDataFrameStore } from "parquet-as-virtual-zarr";
 
 /**
@@ -117,10 +118,8 @@ async function processFile(file) {
   try {
     const source = new FileSource(file);
     const store = ParquetAsAnnDataFrameStore.fromStore(source);
-    const bytes = await store.get("/zarr.json");
-    if (!bytes) throw new Error("Store returned nothing for /zarr.json");
-    const zarrJson = JSON.parse(new TextDecoder().decode(bytes));
-    output.textContent = JSON.stringify(zarrJson, null, 2);
+    const grp = await open(root(store), { kind: "group" });
+    output.textContent = JSON.stringify(grp.attrs, null, 2);
     output.style.display = "block";
 
     const consolidated = await store.getConsolidatedMetadata();
