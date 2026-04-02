@@ -199,9 +199,10 @@ describe("categorical column cell_type", () => {
     expect(grp.attrs.ordered).toBe(false);
   });
 
-  test("codes zarr.json data_type is int8", async () => {
+  test("codes zarr.json data_type matches Arrow index type", async () => {
     const arr = await open(root(store).resolve("cell_type/codes"), { kind: "array" });
-    expect(arr.dtype).toBe("int8");
+    // flechette dictionary() defaults to int32 indices; zero-copy preserves that
+    expect(arr.dtype).toBe("int32");
   });
 
   test("codes zarr.json zarr_format is 3", async () => {
@@ -226,9 +227,10 @@ describe("categorical column leiden", () => {
     expect(grp.attrs["encoding-type"]).toBe("categorical");
   });
 
-  test("codes zarr.json data_type is int8", async () => {
+  test("codes zarr.json data_type matches Arrow index type", async () => {
     const arr = await open(root(store).resolve("leiden/codes"), { kind: "array" });
-    expect(arr.dtype).toBe("int8");
+    // flechette dictionary() defaults to int32 indices; zero-copy preserves that
+    expect(arr.dtype).toBe("int32");
   });
 
   test("categories zarr.json shape matches number of unique values", async () => {
@@ -277,7 +279,7 @@ describe("cell_type categorical data", () => {
 
     const codesArr = await open(root(store).resolve("cell_type/codes"), { kind: "array" });
     const codesChunk = await get(codesArr);
-    const decoded = Array.from(codesChunk.data as Int8Array, (code) => categories[code]);
+    const decoded = Array.from(codesChunk.data as Int32Array, (code) => categories[code]);
     expect(decoded).toEqual(cellTypes);
   });
 });
@@ -296,7 +298,7 @@ describe("leiden categorical data", () => {
 
     const codesArr = await open(root(store).resolve("leiden/codes"), { kind: "array" });
     const codesChunk = await get(codesArr);
-    const decoded = Array.from(codesChunk.data as Int8Array, (code) => categories[code]);
+    const decoded = Array.from(codesChunk.data as Int32Array, (code) => categories[code]);
     expect(decoded).toEqual(leiden);
   });
 });

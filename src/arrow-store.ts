@@ -25,6 +25,13 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   #pandasMeta: any = null;
   #categoriesCache = new Map<string, string[]>();
+  /**
+   * Dictionary-encoded columns whose dictionary values are already sorted
+   * (ascending, no duplicates) and shared across all batches.
+   * For these columns, Arrow index buffers can be passed through directly
+   * as Zarr codes without remapping.
+   */
+  #zeroCopyCodeCols = new Set<string>();
 
   constructor(ipcBytes: Uint8Array | ArrayBuffer) {
     const bytes = ipcBytes instanceof ArrayBuffer ? new Uint8Array(ipcBytes) : ipcBytes;
@@ -34,10 +41,45 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
     if (pandasJson) {
       this.#pandasMeta = JSON.parse(pandasJson);
     }
+
+    this.#detectZeroCopy();
   }
 
   static fromIPC(ipcBytes: Uint8Array | ArrayBuffer): ArrowAsAnnDataFrameStore {
     return new ArrowAsAnnDataFrameStore(ipcBytes);
+  }
+
+  /**
+   * Detect dictionary-encoded columns that can use zero-copy code pass-through.
+   * Eligible when: all batches share the same dictionary AND dictionary values
+   * are strictly sorted ascending (no duplicates).
+   */
+  #detectZeroCopy(): void {
+    const catCols = this.#categoricalColumnNames();
+    for (const name of catCols) {
+      const col = this.#getColumn(name);
+      if (col.type.typeId !== Type.Dictionary) continue;
+      if (col.data.length === 0) continue;
+
+      const dict0 = col.data[0].dictionary;
+      if (!dict0 || dict0.length === 0) continue;
+
+      // All batches must share the same dictionary reference
+      let eligible = true;
+      for (let b = 1; b < col.data.length; b++) {
+        if (col.data[b].dictionary !== dict0) { eligible = false; break; }
+      }
+      if (!eligible) continue;
+
+      // Dictionary values must be strictly sorted ascending (implies no duplicates)
+      let sorted = true;
+      for (let i = 1; i < dict0.length; i++) {
+        if (dict0.at(i) <= dict0.at(i - 1)) { sorted = false; break; }
+      }
+      if (!sorted) continue;
+
+      this.#zeroCopyCodeCols.add(name);
+    }
   }
 
   #columnNames(): string[] {
@@ -167,8 +209,17 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
     }
     const col = this.#getColumn(colName);
     if (col.type.typeId === Type.Dictionary) {
-      // Extract dictionary values and sort them
       const dict = col.data[0].dictionary;
+      if (this.#zeroCopyCodeCols.has(colName)) {
+        // Dictionary is already sorted with no duplicates — use directly
+        const categories: string[] = [];
+        for (let i = 0; i < dict.length; i++) {
+          categories.push(dict.at(i));
+        }
+        this.#categoriesCache.set(colName, categories);
+        return categories;
+      }
+      // Extract dictionary values, deduplicate, and sort
       const values: string[] = [];
       for (let i = 0; i < dict.length; i++) {
         values.push(dict.at(i));
@@ -246,13 +297,25 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
     return new TextEncoder().encode(JSON.stringify(obj));
   }
 
-  #codeDataType(numCategories: number): string {
+  #codeDataType(colName: string, numCategories: number): string {
+    if (this.#zeroCopyCodeCols.has(colName)) {
+      const bpe = this.#getColumn(colName).data[0].values.BYTES_PER_ELEMENT;
+      if (bpe === 1) return "int8";
+      if (bpe === 2) return "int16";
+      return "int32";
+    }
     if (numCategories <= 128) return "int8";
     if (numCategories <= 32768) return "int16";
     return "int32";
   }
 
-  #codeDtype(numCategories: number): string {
+  #codeDtype(colName: string, numCategories: number): string {
+    if (this.#zeroCopyCodeCols.has(colName)) {
+      const bpe = this.#getColumn(colName).data[0].values.BYTES_PER_ELEMENT;
+      if (bpe === 1) return "|i1";
+      if (bpe === 2) return "<i2";
+      return "<i4";
+    }
     if (numCategories <= 128) return "|i1";
     if (numCategories <= 32768) return "<i2";
     return "<i4";
@@ -329,7 +392,7 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
 
   #codesArrayMeta(colName: string): Record<string, unknown> {
     const categories = this.#getCategories(colName);
-    const dataType = this.#codeDataType(categories.length);
+    const dataType = this.#codeDataType(colName, categories.length);
     const numRows = this.#totalRows();
     const chunkSize = this.#rowsInBatch(0);
     return {
@@ -459,9 +522,16 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
         if (parts.length === 4 && parts[2] === "c") {
           const chunkIndex = Number(parts[3]);
           if (Number.isInteger(chunkIndex) && chunkIndex >= 0 && chunkIndex < numBatches) {
+            if (this.#zeroCopyCodeCols.has(colName)) {
+              // Zero-copy: return raw Arrow index buffer directly
+              const col = this.#getColumn(colName);
+              const batch = col.data[chunkIndex];
+              const values = batch.values;
+              return new Uint8Array(values.buffer, values.byteOffset, batch.length * values.BYTES_PER_ELEMENT);
+            }
             const codes = this.#readCodesBatch(colName, chunkIndex);
             const categories = this.#getCategories(colName);
-            const codeDtype = this.#codeDtype(categories.length);
+            const codeDtype = this.#codeDtype(colName, categories.length);
             return this.#encodeTypedArray(codes, codeDtype);
           }
         }
