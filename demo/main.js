@@ -173,7 +173,7 @@ async function renderFirstChunkTable(grp) {
   // For each column, read the first chunk.
   const columnData = [];
   for (const col of columns) {
-    const colNode = await open(grp.resolve(col), { kind: "unknown" });
+    const colNode = await open(grp.resolve(col));
     const isCategorical = colNode.attrs?.["encoding-type"] === "categorical";
 
     let values;
