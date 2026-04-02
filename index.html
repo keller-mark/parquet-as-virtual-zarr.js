@@ -28,6 +28,20 @@
       padding: 1rem; overflow: auto; max-height: 70vh; font-size: 0.85rem;
       white-space: pre-wrap; word-break: break-all; display: none;
     }
+    #chunk-table-container {
+      display: none; overflow-x: auto; margin-top: 1.5rem; margin-bottom: 1.5rem;
+    }
+    #chunk-table-container table {
+      border-collapse: collapse; font-size: 0.85rem; width: 100%;
+    }
+    #chunk-table-container th, #chunk-table-container td {
+      border: 1px solid #ddd; padding: 0.35rem 0.6rem; text-align: left;
+      white-space: nowrap;
+    }
+    #chunk-table-container th {
+      background: #f0f0f0; font-weight: 600; position: sticky; top: 0;
+    }
+    #chunk-table-container tr:nth-child(even) td { background: #fafafa; }
   </style>
 </head>
 <body>
@@ -49,6 +63,10 @@
   </div>
 
   <p id="status"></p>
+
+  <h2 id="chunk-table-heading" style="display:none; margin-top:1.5rem;">First Row-Group</h2>
+  <div id="chunk-table-container"></div>
+
   <pre id="output"></pre>
 
   <h2 id="consolidated-heading" style="display:none; margin-top:1.5rem;">Consolidated Metadata</h2>

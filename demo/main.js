@@ -1,4 +1,4 @@
-import { open, root } from "zarrita";
+import { open, get, root, slice } from "zarrita";
 import { ParquetAsAnnDataFrameStore, CsvAsAnnDataFrameStore } from "parquet-as-virtual-zarr";
 
 /**
@@ -114,6 +114,9 @@ dirInput.addEventListener("change", () => {
 async function processFile(file) {
   output.style.display = "none";
   output.textContent = "";
+  document.getElementById("chunk-table-container").style.display = "none";
+  document.getElementById("chunk-table-container").innerHTML = "";
+  document.getElementById("chunk-table-heading").style.display = "none";
   setStatus(`Reading ${file.name}…`);
 
   const fmt = (n) => n >= 1024 * 1024
@@ -142,6 +145,8 @@ async function processFile(file) {
     consolidatedOutput.style.display = "block";
     consolidatedHeading.style.display = "block";
 
+    await renderFirstChunkTable(grp);
+
     if (isCsv) {
       setStatus(`${file.name} — loaded ${fmt(file.size)}`);
     } else {
@@ -153,6 +158,61 @@ async function processFile(file) {
     setStatus("Error: " + err.message);
     console.error(err);
   }
+}
+
+/* ── first-chunk table ───────────────────────────────────────────────────── */
+
+async function renderFirstChunkTable(grp) {
+  const tableContainer = document.getElementById("chunk-table-container");
+  tableContainer.innerHTML = "";
+  document.getElementById("chunk-table-heading").style.display = "block";
+
+  const columns = grp.attrs["column-order"] ?? [];
+  if (columns.length === 0) return;
+
+  // For each column, read the first chunk.
+  const columnData = [];
+  for (const col of columns) {
+    const colNode = await open(grp.resolve(col), { kind: "unknown" });
+    const isCategorical = colNode.attrs?.["encoding-type"] === "categorical";
+
+    let values;
+    if (isCategorical) {
+      const codesArr = await open(grp.resolve(`${col}/codes`), { kind: "array" });
+      const catsArr = await open(grp.resolve(`${col}/categories`), { kind: "array" });
+      const chunkSize = codesArr.chunks[0];
+      const codesChunk = await get(codesArr, [slice(0, chunkSize)]);
+      const catsChunk = await get(catsArr);
+      const categories = catsChunk.data;
+      values = Array.from(codesChunk.data, (code) => categories[code]);
+    } else {
+      const arr = await open(grp.resolve(col), { kind: "array" });
+      const chunkSize = arr.chunks[0];
+      const chunk = await get(arr, [slice(0, chunkSize)]);
+      values = Array.from(chunk.data);
+    }
+    columnData.push({ col, values });
+  }
+
+  const nRows = columnData[0]?.values.length ?? 0;
+  const table = document.createElement("table");
+  const thead = table.createTHead();
+  const headerRow = thead.insertRow();
+  for (const { col } of columnData) {
+    const th = document.createElement("th");
+    th.textContent = col;
+    headerRow.appendChild(th);
+  }
+  const tbody = table.createTBody();
+  for (let i = 0; i < nRows; i++) {
+    const row = tbody.insertRow();
+    for (const { values } of columnData) {
+      const td = row.insertCell();
+      td.textContent = values[i] ?? "";
+    }
+  }
+  tableContainer.appendChild(table);
+  tableContainer.style.display = "block";
 }
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
