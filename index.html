@@ -32,13 +32,13 @@
 </head>
 <body>
   <h1>Parquet as Virtual Zarr</h1>
-  <p class="subtitle">Select or drop a <code>.parquet</code> file (or a directory containing one) to view its virtual Zarr v3 <code>/zarr.json</code>.</p>
+  <p class="subtitle">Select or drop a <code>.parquet</code>, <code>.csv</code>, or <code>.tsv</code> file to view its virtual Zarr v3 <code>/zarr.json</code>. A directory containing a <code>.parquet</code> file can also be dropped.</p>
 
   <div id="drop-zone">
     <div class="file-inputs">
       <label>
-        Choose a .parquet file
-        <input type="file" id="file-input" accept=".parquet">
+        Choose a file
+        <input type="file" id="file-input" accept=".parquet,.csv,.tsv">
       </label>
       <label>
         Choose a directory

@@ -1,5 +1,5 @@
 import { open, root } from "zarrita";
-import { ParquetAsAnnDataFrameStore } from "parquet-as-virtual-zarr";
+import { ParquetAsAnnDataFrameStore, CsvAsAnnDataFrameStore } from "parquet-as-virtual-zarr";
 
 /**
  * AsyncReadable backed by a browser File object.
@@ -70,15 +70,16 @@ dropZone.addEventListener("drop", async (e) => {
   dropZone.classList.remove("drag-over");
 
   const items = [...e.dataTransfer.items];
-  // Prefer a .parquet file directly; otherwise search directory entries.
+  // Prefer a .parquet, .csv, or .tsv file dropped directly.
   for (const item of items) {
     const entry = item.webkitGetAsEntry?.();
-    if (entry?.isFile && entry.name.endsWith(".parquet")) {
+    if (entry?.isFile && isSupportedFile(entry.name)) {
       processFile(await entryToFile(entry));
       return;
     }
   }
-  // If a directory was dropped, scan it for the first .parquet file.
+  // If a directory was dropped, scan it for the first .parquet file (CSV/TSV
+  // directories are not supported).
   for (const item of items) {
     const entry = item.webkitGetAsEntry?.();
     if (entry?.isDirectory) {
@@ -90,9 +91,9 @@ dropZone.addEventListener("drop", async (e) => {
     }
   }
   // Fallback: use dataTransfer.files
-  const file = [...e.dataTransfer.files].find((f) => f.name.endsWith(".parquet"));
+  const file = [...e.dataTransfer.files].find((f) => isSupportedFile(f.name));
   if (file) processFile(file);
-  else setStatus("No .parquet file found in the dropped item.");
+  else setStatus("No supported file (.parquet, .csv, .tsv) found in the dropped item.");
 });
 
 /* ── file / directory inputs ─────────────────────────────────────────────── */
@@ -115,9 +116,21 @@ async function processFile(file) {
   output.textContent = "";
   setStatus(`Reading ${file.name}…`);
 
+  const fmt = (n) => n >= 1024 * 1024
+    ? (n / (1024 * 1024)).toFixed(2) + " MB"
+    : (n / 1024).toFixed(1) + " KB";
+
   try {
     const source = new FileSource(file);
-    const store = ParquetAsAnnDataFrameStore.fromStore(source);
+    const isCsv = file.name.endsWith(".csv") || file.name.endsWith(".tsv");
+    let store;
+    if (isCsv) {
+      const sep = file.name.endsWith(".tsv") ? "\t" : ",";
+      store = await CsvAsAnnDataFrameStore.fromStore(source, { separator: sep });
+    } else {
+      store = ParquetAsAnnDataFrameStore.fromStore(source);
+    }
+
     const grp = await open(root(store), { kind: "group" });
     output.textContent = JSON.stringify(grp.attrs, null, 2);
     output.style.display = "block";
@@ -129,12 +142,13 @@ async function processFile(file) {
     consolidatedOutput.style.display = "block";
     consolidatedHeading.style.display = "block";
 
-    const bytesRead = source.uniqueBytesFetched();
-    const pct = ((bytesRead / file.size) * 100).toFixed(1);
-    const fmt = (n) => n >= 1024 * 1024
-      ? (n / (1024 * 1024)).toFixed(2) + " MB"
-      : (n / 1024).toFixed(1) + " KB";
-    setStatus(`${file.name} — read ${fmt(bytesRead)} of ${fmt(file.size)} (${pct}%)`);
+    if (isCsv) {
+      setStatus(`${file.name} — loaded ${fmt(file.size)}`);
+    } else {
+      const bytesRead = source.uniqueBytesFetched();
+      const pct = ((bytesRead / file.size) * 100).toFixed(1);
+      setStatus(`${file.name} — read ${fmt(bytesRead)} of ${fmt(file.size)} (${pct}%)`);
+    }
   } catch (err) {
     setStatus("Error: " + err.message);
     console.error(err);
@@ -142,6 +156,10 @@ async function processFile(file) {
 }
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
+
+function isSupportedFile(name) {
+  return name.endsWith(".parquet") || name.endsWith(".csv") || name.endsWith(".tsv");
+}
 
 function setStatus(msg) {
   document.getElementById("status").textContent = msg;
