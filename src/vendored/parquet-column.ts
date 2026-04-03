@@ -325,7 +325,18 @@ function readPlainByteArray(reader: DataReader, count: number): Uint8Array[] {
   return values;
 }
 
-type DecodedArray = Int32Array | BigInt64Array | Float32Array | Float64Array | Uint8Array[] | string[];
+type DecodedArray = Int32Array | BigInt64Array | Float32Array | Float64Array | Uint8Array | Uint8Array[] | string[];
+
+function readPlainBoolean(reader: DataReader, count: number): Uint8Array {
+  const byteCount = Math.ceil(count / 8);
+  const result = new Uint8Array(count);
+  for (let i = 0; i < count; i++) {
+    const byte = reader.view.getUint8(reader.offset + Math.floor(i / 8));
+    result[i] = (byte >> (i % 8)) & 1;
+  }
+  reader.offset += byteCount;
+  return result;
+}
 
 function readPlainValues(
   reader: DataReader,
@@ -343,6 +354,8 @@ function readPlainValues(
       return readPlainDouble(reader, count);
     case "BYTE_ARRAY":
       return readPlainByteArray(reader, count);
+    case "BOOLEAN":
+      return readPlainBoolean(reader, count);
     default:
       throw new Error(`parquet unsupported PLAIN type: ${parquetType}`);
   }
@@ -443,6 +456,8 @@ function expandNullable(
     result = new Int32Array(total);
   } else if (parquetType === "INT64") {
     result = new BigInt64Array(total);
+  } else if (parquetType === "BOOLEAN") {
+    result = new Uint8Array(total);
   } else {
     result = new Array<Uint8Array>(total).fill(new Uint8Array(0));
   }

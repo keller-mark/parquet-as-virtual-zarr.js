@@ -502,11 +502,18 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     return schema?.repetition_type === "OPTIONAL";
   }
 
+  /** True if the parquet column has BOOLEAN type. */
+  #isBoolean(colName: string): boolean {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const schema = this.#schema.find((s: any) => s.name === colName);
+    return schema?.type === "BOOLEAN";
+  }
+
   /** AnnData nullable encoding-type string for a column. */
   #nullableEncodingType(colName: string): string {
-    return this.#parquetTypeToDtype(colName) === "|O"
-      ? "nullable-string-array"
-      : "nullable-integer";
+    if (this.#isBoolean(colName)) return "nullable-boolean";
+    if (this.#parquetTypeToDtype(colName) === "|O") return "nullable-string-array";
+    return "nullable-integer";
   }
 
   #nullableGroupMeta(encodingType: string): Record<string, unknown> {
@@ -619,9 +626,11 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
           ...this.#nullableGroupMeta(encodingType),
           consolidated_metadata: { kind: "inline", must_understand: false, metadata: {} },
         };
-        metadata[`${col}/values`] = dtype === "|O"
-          ? this.#stringArrayMeta(col, "string-array")
-          : this.#numericArrayMeta(col);
+        metadata[`${col}/values`] = this.#isBoolean(col)
+          ? this.#maskArrayMeta()
+          : dtype === "|O"
+            ? this.#stringArrayMeta(col, "string-array")
+            : this.#numericArrayMeta(col);
         metadata[`${col}/mask`] = this.#maskArrayMeta();
       } else {
         if (isIndex || dtype === "|O") {
@@ -713,6 +722,7 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
 
       if (subGroup === "values") {
         if (parts.length === 3 && parts[2] === "zarr.json") {
+          if (this.#isBoolean(colName)) return this.#json(this.#maskArrayMeta());
           if (dtype === "|O") return this.#json(this.#stringArrayMeta(colName, "string-array"));
           return this.#json(this.#numericArrayMeta(colName));
         }
