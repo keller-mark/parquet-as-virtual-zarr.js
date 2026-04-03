@@ -5,6 +5,7 @@ import {
   isZeroCopyEligible,
   extractZeroCopyPageData,
   readColumnChunkData,
+  readNullMask,
   parsePageHeader,
 } from "./vendored/parquet-column.js";
 import { createReader } from "./vendored/thrift.js";
@@ -37,12 +38,17 @@ interface RgMapping {
  *
  * Key routing (Zarr v3):
  *   /zarr.json                        → dataframe group metadata
- *   /{col}/zarr.json                  → array metadata (non-categorical) or group (categorical)
- *   /{col}/c/{rg}                     → raw chunk bytes (non-categorical)
- *   /{col}/codes/zarr.json            → codes array metadata
- *   /{col}/codes/c/{rg}              → codes chunk bytes
- *   /{col}/categories/zarr.json       → categories array metadata
- *   /{col}/categories/c/0            → categories chunk bytes (vlen-utf8)
+ *   /{col}/zarr.json                  → array metadata (non-nullable, non-categorical) or group
+ *   /{col}/c/{rg}                     → raw chunk bytes (non-nullable, non-categorical)
+ *   /{col}/zarr.json                  → nullable group (encoding-type: nullable-integer / nullable-string-array)
+ *   /{col}/values/zarr.json           → values array metadata (nullable columns)
+ *   /{col}/values/c/{rg}              → values chunk bytes (nullable columns)
+ *   /{col}/mask/zarr.json             → mask array metadata (nullable columns, bool dtype)
+ *   /{col}/mask/c/{rg}               → mask chunk bytes: 1=null, 0=present (nullable columns)
+ *   /{col}/codes/zarr.json            → codes array metadata (categorical)
+ *   /{col}/codes/c/{rg}              → codes chunk bytes (categorical)
+ *   /{col}/categories/zarr.json       → categories array metadata (categorical)
+ *   /{col}/categories/c/0            → categories chunk bytes (vlen-utf8, categorical)
  */
 export class ParquetAsAnnDataFrameStore implements AsyncReadable {
   readonly #store: AsyncReadable;
@@ -489,6 +495,54 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     };
   }
 
+  /** True if the parquet column is OPTIONAL (i.e. nullable). */
+  #isNullable(colName: string): boolean {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const schema = this.#schema.find((s: any) => s.name === colName);
+    return schema?.repetition_type === "OPTIONAL";
+  }
+
+  /** AnnData nullable encoding-type string for a column. */
+  #nullableEncodingType(colName: string): string {
+    return this.#parquetTypeToDtype(colName) === "|O"
+      ? "nullable-string-array"
+      : "nullable-integer";
+  }
+
+  #nullableGroupMeta(encodingType: string): Record<string, unknown> {
+    return {
+      zarr_format: 3,
+      node_type: "group",
+      attributes: {
+        "encoding-type": encodingType,
+        "encoding-version": "0.1.0",
+      },
+    };
+  }
+
+  #maskArrayMeta(): Record<string, unknown> {
+    const numRows = this.#totalRows();
+    const maxRowsPerRg = this.#rowsInGroup(0);
+    return {
+      zarr_format: 3,
+      node_type: "array",
+      shape: [numRows],
+      data_type: "bool",
+      chunk_grid: { name: "regular", configuration: { chunk_shape: [maxRowsPerRg] } },
+      chunk_key_encoding: { name: "default", configuration: { separator: "/" } },
+      fill_value: false,
+      codecs: [{ name: "bytes", configuration: { endian: "little" } }],
+      attributes: {},
+    };
+  }
+
+  async #readMaskForRg(colName: string, rgIndex: number): Promise<Uint8Array> {
+    const rawBytes = await this.#fetchColumnChunkBytes(colName, rgIndex);
+    const { meta } = this.#getColumnMeta(colName, rgIndex);
+    const numRows = this.#rowsInGroup(rgIndex);
+    return readNullMask(rawBytes, meta.codec, numRows);
+  }
+
   #categoricalGroupMeta(): Record<string, unknown> {
     return {
       zarr_format: 3,
@@ -546,18 +600,30 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     const metadata: Record<string, unknown> = {};
 
     for (const col of allCols) {
+      const isIndex = col === this.#indexColumnName();
+      const dtype = this.#parquetTypeToDtype(col);
+      const isNullable = !catCols.has(col) && !isIndex && this.#isNullable(col);
+
       if (catCols.has(col)) {
         // Categorical column → group with nested consolidated_metadata
         metadata[col] = {
           ...this.#categoricalGroupMeta(),
           consolidated_metadata: { kind: "inline", must_understand: false, metadata: {} },
         };
-        // codes and categories arrays
         metadata[`${col}/codes`] = await this.#codesArrayMeta(col);
         metadata[`${col}/categories`] = await this.#categoriesArrayMeta(col);
+      } else if (isNullable) {
+        // Nullable column → nullable group with values + mask sub-arrays
+        const encodingType = this.#nullableEncodingType(col);
+        metadata[col] = {
+          ...this.#nullableGroupMeta(encodingType),
+          consolidated_metadata: { kind: "inline", must_understand: false, metadata: {} },
+        };
+        metadata[`${col}/values`] = dtype === "|O"
+          ? this.#stringArrayMeta(col, "string-array")
+          : this.#numericArrayMeta(col);
+        metadata[`${col}/mask`] = this.#maskArrayMeta();
       } else {
-        const isIndex = col === this.#indexColumnName();
-        const dtype = this.#parquetTypeToDtype(col);
         if (isIndex || dtype === "|O") {
           metadata[col] = this.#stringArrayMeta(col, "string-array");
         } else {
@@ -611,16 +677,18 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     const isIndex = colName === this.#indexColumnName();
     const dtype = this.#parquetTypeToDtype(colName);
     const numRgs = this.#numRowGroups();
+    const isNullable = !isCat && !isIndex && this.#isNullable(colName);
 
     // /{col}/zarr.json
     if (parts.length === 2 && parts[1] === "zarr.json") {
       if (isCat) return this.#json(this.#categoricalGroupMeta());
+      if (isNullable) return this.#json(this.#nullableGroupMeta(this.#nullableEncodingType(colName)));
       if (isIndex || dtype === "|O") return this.#json(this.#stringArrayMeta(colName, "string-array"));
       return this.#json(this.#numericArrayMeta(colName));
     }
 
-    // /{col}/c/{rg}
-    if (parts.length === 3 && parts[1] === "c" && !isCat) {
+    // /{col}/c/{rg} — non-nullable, non-categorical columns only
+    if (parts.length === 3 && parts[1] === "c" && !isCat && !isNullable) {
       const rgIndex = Number(parts[2]);
       if (Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < numRgs) {
         const chunkData = await this.#readColumnChunkForRg(colName, rgIndex);
@@ -636,6 +704,43 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
         if (dtype === "|O") return this.#encodeVlenUtf8(chunkData as string[]);
         // Plain array of numbers (dictionary-encoded) — encode to typed array
         return this.#encodeTypedArray(chunkData as number[], dtype);
+      }
+    }
+
+    // /{col}/values/… and /{col}/mask/… — nullable columns
+    if (isNullable) {
+      const subGroup = parts[1];
+
+      if (subGroup === "values") {
+        if (parts.length === 3 && parts[2] === "zarr.json") {
+          if (dtype === "|O") return this.#json(this.#stringArrayMeta(colName, "string-array"));
+          return this.#json(this.#numericArrayMeta(colName));
+        }
+        if (parts.length === 4 && parts[2] === "c") {
+          const rgIndex = Number(parts[3]);
+          if (Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < numRgs) {
+            const chunkData = await this.#readColumnChunkForRg(colName, rgIndex);
+            if (chunkData instanceof Uint8Array) return chunkData;
+            if (ArrayBuffer.isView(chunkData)) {
+              const ta = chunkData as ArrayBufferView;
+              return new Uint8Array(ta.buffer, ta.byteOffset, ta.byteLength);
+            }
+            if (dtype === "|O") return this.#encodeVlenUtf8(chunkData as string[]);
+            return this.#encodeTypedArray(chunkData as number[], dtype);
+          }
+        }
+      }
+
+      if (subGroup === "mask") {
+        if (parts.length === 3 && parts[2] === "zarr.json") {
+          return this.#json(this.#maskArrayMeta());
+        }
+        if (parts.length === 4 && parts[2] === "c") {
+          const rgIndex = Number(parts[3]);
+          if (Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < numRgs) {
+            return await this.#readMaskForRg(colName, rgIndex);
+          }
+        }
       }
     }
 

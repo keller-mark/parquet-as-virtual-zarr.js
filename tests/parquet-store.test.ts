@@ -79,19 +79,25 @@ describe("root /zarr.json", () => {
 });
 
 describe("numeric column n_counts", () => {
-  test("zarr.json data_type matches zarr", async () => {
-    const arr = await open(root(store).resolve("n_counts"), { kind: "array" });
+  test("zarr.json is a nullable group", async () => {
+    const grp = await open(root(store).resolve("n_counts"), { kind: "group" });
+    expect(grp.kind).toBe("group");
+    expect(grp.attrs["encoding-type"]).toBe("nullable-integer");
+  });
+
+  test("values zarr.json data_type matches zarr", async () => {
+    const arr = await open(root(store).resolve("n_counts/values"), { kind: "array" });
     const actual = await zarrMeta("n_counts/zarr.json");
     expect(arr.dtype).toBe(actual.data_type);
   });
 
-  test("zarr.json zarr_format is 3 and node_type is array", async () => {
-    const arr = await open(root(store).resolve("n_counts"), { kind: "array" });
+  test("values zarr.json node_type is array", async () => {
+    const arr = await open(root(store).resolve("n_counts/values"), { kind: "array" });
     expect(arr.kind).toBe("array");
   });
 
-  test("zarr.json shape covers all rows", async () => {
-    const arr = await open(root(store).resolve("n_counts"), { kind: "array" });
+  test("values zarr.json shape covers all rows", async () => {
+    const arr = await open(root(store).resolve("n_counts/values"), { kind: "array" });
     const numRows = parquetMeta.row_groups.reduce(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (s: number, rg: any) => s + Number(rg.num_rows),
@@ -100,16 +106,16 @@ describe("numeric column n_counts", () => {
     expect(arr.shape[0]).toBe(numRows);
   });
 
-  test("zarr.json attributes encoding-type matches zarr", async () => {
-    const arr = await open(root(store).resolve("n_counts"), { kind: "array" });
+  test("values zarr.json attributes encoding-type matches zarr", async () => {
+    const arr = await open(root(store).resolve("n_counts/values"), { kind: "array" });
     const actual = await zarrMeta("n_counts/zarr.json");
     const vAttrs = arr.attrs;
     const aAttrs = actual.attributes as Record<string, unknown>;
     expect(vAttrs["encoding-type"]).toBe(aAttrs["encoding-type"]);
   });
 
-  test("zarr.json codecs include bytes with little endian", async () => {
-    const virtual = await getJson(store, "/n_counts/zarr.json");
+  test("values zarr.json codecs include bytes with little endian", async () => {
+    const virtual = await getJson(store, "/n_counts/values/zarr.json");
     const codecs = virtual.codecs as Array<Record<string, unknown>>;
     const bytesCodec = codecs.find((c) => c.name === "bytes");
     expect(bytesCodec).toBeDefined();
@@ -118,14 +124,14 @@ describe("numeric column n_counts", () => {
 });
 
 describe("numeric column n_genes", () => {
-  test("zarr.json data_type matches zarr", async () => {
-    const arr = await open(root(store).resolve("n_genes"), { kind: "array" });
+  test("values zarr.json data_type matches zarr", async () => {
+    const arr = await open(root(store).resolve("n_genes/values"), { kind: "array" });
     const actual = await zarrMeta("n_genes/zarr.json");
     expect(arr.dtype).toBe(actual.data_type);
   });
 
-  test("zarr.json attributes encoding-type matches zarr", async () => {
-    const arr = await open(root(store).resolve("n_genes"), { kind: "array" });
+  test("values zarr.json attributes encoding-type matches zarr", async () => {
+    const arr = await open(root(store).resolve("n_genes/values"), { kind: "array" });
     const actual = await zarrMeta("n_genes/zarr.json");
     const vAttrs = arr.attrs;
     const aAttrs = actual.attributes as Record<string, unknown>;
@@ -224,7 +230,7 @@ describe("categorical column leiden", () => {
 
 describe("n_counts array data", () => {
   test("all row groups values match parquet", async () => {
-    const arr = await open(root(store).resolve("n_counts"), { kind: "array" });
+    const arr = await open(root(store).resolve("n_counts/values"), { kind: "array" });
     const chunk = await get(arr);
     const virtualValues = Array.from(chunk.data as Float32Array);
     const rows = (await parquetReadObjects({
@@ -239,7 +245,7 @@ describe("n_counts array data", () => {
 
 describe("n_genes array data", () => {
   test("all row groups values match parquet", async () => {
-    const arr = await open(root(store).resolve("n_genes"), { kind: "array" });
+    const arr = await open(root(store).resolve("n_genes/values"), { kind: "array" });
     const chunk = await get(arr);
     const virtualValues = Array.from(chunk.data as Int32Array);
     const rows = (await parquetReadObjects({
@@ -339,9 +345,9 @@ describe("leiden categorical data", () => {
 
 describe("getRange", () => {
   test("offset+length slice of a numeric chunk is correct", async () => {
-    const full = await store.get("/n_counts/c/0");
+    const full = await store.get("/n_counts/values/c/0");
     expect(full).toBeDefined();
-    const ranged = await store.getRange("/n_counts/c/0", { offset: 4, length: 8 });
+    const ranged = await store.getRange("/n_counts/values/c/0", { offset: 4, length: 8 });
     expect(ranged).toBeDefined();
     expect(Array.from(ranged!)).toEqual(Array.from(full!.slice(4, 12)));
   });
@@ -389,7 +395,11 @@ describe("consolidated metadata", () => {
       "leiden/categories",
       "leiden/codes",
       "n_counts",
+      "n_counts/mask",
+      "n_counts/values",
       "n_genes",
+      "n_genes/mask",
+      "n_genes/values",
       "obs_id",
     ]);
   });
@@ -398,8 +408,10 @@ describe("consolidated metadata", () => {
     const consolidated = await store.getConsolidatedMetadata();
     const cm = consolidated.consolidated_metadata as Record<string, Record<string, Record<string, unknown>>>;
     const nCounts = cm.metadata["n_counts"];
-    expect(nCounts.node_type).toBe("array");
-    expect(nCounts.data_type).toBe("float32");
+    expect(nCounts.node_type).toBe("group");
+    const nCountsValues = cm.metadata["n_counts/values"];
+    expect(nCountsValues.node_type).toBe("array");
+    expect(nCountsValues.data_type).toBe("float32");
   });
 
   test("categorical group has consolidated_metadata with empty metadata", async () => {
@@ -450,6 +462,6 @@ describe("unknown keys return undefined", () => {
 
   test("out-of-range row group", async () => {
     const numRgs = parquetMeta.row_groups.length;
-    expect(await store.get(`/n_counts/c/${numRgs}` as `/${string}`)).toBeUndefined();
+    expect(await store.get(`/n_counts/values/c/${numRgs}` as `/${string}`)).toBeUndefined();
   });
 });

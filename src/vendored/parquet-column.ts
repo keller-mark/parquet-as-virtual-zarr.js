@@ -672,3 +672,64 @@ export async function readColumnChunkData(
 
   return allValues.flat();
 }
+
+/**
+ * Read the null mask for a column chunk.
+ * Returns a Uint8Array of length `numValues` where 1 = null and 0 = present.
+ * Extracts definition levels from DATA_PAGE (V1) and DATA_PAGE_V2 pages.
+ * For V1 pages the whole page is decompressed; for V2 pages definition levels
+ * are always uncompressed so decompression is skipped.
+ */
+export async function readNullMask(
+  rawBytes: Uint8Array,
+  codec: string,
+  numValues: number,
+): Promise<Uint8Array> {
+  const mask = new Uint8Array(numValues); // 0 = present, 1 = null
+  const reader = createReader(rawBytes);
+  let written = 0;
+
+  while (reader.offset < rawBytes.byteLength && written < numValues) {
+    const header = parsePageHeader(reader);
+    const pageBytes = new Uint8Array(
+      rawBytes.buffer,
+      rawBytes.byteOffset + reader.offset,
+      header.compressed_page_size,
+    );
+    reader.offset += header.compressed_page_size;
+
+    if (header.type === "DICTIONARY_PAGE") {
+      continue;
+    } else if (header.type === "DATA_PAGE") {
+      const daph = header.data_page_header!;
+      // Decompress page to access definition levels
+      const page = await decompressPage(pageBytes, header.uncompressed_page_size, codec);
+      const pageReader = createReader(page);
+      const defLength = pageReader.view.getUint32(pageReader.offset, true);
+      pageReader.offset += 4;
+      const levels = new Array<number>(daph.num_values).fill(1);
+      if (defLength > 0) {
+        readRleBitPackedHybrid(pageReader, 1, levels, defLength);
+      }
+      for (let i = 0; i < daph.num_values; i++) {
+        mask[written++] = levels[i] === 0 ? 1 : 0;
+      }
+    } else if (header.type === "DATA_PAGE_V2") {
+      const daph2 = header.data_page_header_v2!;
+      const repLen = daph2.repetition_levels_byte_length;
+      const defLen = daph2.definition_levels_byte_length;
+      // Definition levels are always uncompressed in V2 pages
+      const levels = new Array<number>(daph2.num_values).fill(1);
+      if (defLen > 0) {
+        const defBytes = pageBytes.subarray(repLen, repLen + defLen);
+        const defReader = createReader(defBytes);
+        readRleBitPackedHybrid(defReader, 1, levels, defLen);
+      }
+      for (let i = 0; i < daph2.num_values; i++) {
+        mask[written++] = levels[i] === 0 ? 1 : 0;
+      }
+    }
+  }
+
+  return mask;
+}

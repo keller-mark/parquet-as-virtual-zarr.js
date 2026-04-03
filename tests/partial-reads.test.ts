@@ -142,7 +142,7 @@ describe("init phase", () => {
     const spy = makeStoreSpy();
     const s = store(spy);
     await open(root(s), { kind: "group" });
-    await s.get("/n_counts/c/0");
+    await s.get("/n_counts/values/c/0");
     await s.get("/cell_type/categories/c/0");
     expect(spy.getCalls).toBe(0);
   });
@@ -154,7 +154,7 @@ describe("init phase", () => {
     const callsAfterInit = spy.fetchCalls.length;
 
     // These keys are derived entirely from the already-parsed parquet footer.
-    await open(root(s).resolve("n_counts"), { kind: "array" });
+    await open(root(s).resolve("n_counts"), { kind: "group" });
     await open(root(s).resolve("cell_type"), { kind: "group" });
 
     expect(spy.fetchCalls.length).toBe(callsAfterInit);
@@ -169,7 +169,7 @@ describe("numeric column chunk reads", () => {
 
     for (let rg = 0; rg < numRgs; rg++) {
       const before = spy.fetchCalls.length;
-      await s.get(`/n_counts/c/${rg}` as AbsolutePath);
+      await s.get(`/n_counts/values/c/${rg}` as AbsolutePath);
       expect(spy.fetchCalls.length - before).toBe(1);
     }
   });
@@ -181,7 +181,7 @@ describe("numeric column chunk reads", () => {
 
     for (let rg = 0; rg < numRgs; rg++) {
       const before = spy.fetchCalls.length;
-      await s.get(`/n_counts/c/${rg}` as AbsolutePath);
+      await s.get(`/n_counts/values/c/${rg}` as AbsolutePath);
       const [call] = spy.fetchCalls.slice(before);
       expect(call).toEqual(colByteRange(parquetMeta, rg, "n_counts"));
     }
@@ -193,7 +193,7 @@ describe("numeric column chunk reads", () => {
     await open(root(s), { kind: "group" });
 
     const before = spy.fetchCalls.length;
-    await s.get("/n_counts/c/0");
+    await s.get("/n_counts/values/c/0");
     const [call] = spy.fetchCalls.slice(before);
 
     for (let rg = 1; rg < numRgs; rg++) {
@@ -210,8 +210,8 @@ describe("numeric column chunk reads", () => {
     await open(root(s), { kind: "group" });
 
     const before = spy.fetchCalls.length;
-    await s.get("/n_counts/c/0");
-    await s.get("/n_genes/c/0");
+    await s.get("/n_counts/values/c/0");
+    await s.get("/n_genes/values/c/0");
     const newCalls = spy.fetchCalls.slice(before);
 
     expect(newCalls.length).toBe(2);
@@ -226,7 +226,7 @@ describe("numeric column chunk reads", () => {
 
     for (let rg = 0; rg < numRgs; rg++) {
       const before = spy.fetchCalls.length;
-      await s.get(`/n_counts/c/${rg}` as AbsolutePath);
+      await s.get(`/n_counts/values/c/${rg}` as AbsolutePath);
       const [call] = spy.fetchCalls.slice(before);
       expect(call.length / spy.fileSize).toBeLessThan(0.1);
     }
@@ -312,7 +312,7 @@ describe("unique bytes fraction", () => {
     await open(root(s), { kind: "group" });
 
     for (let rg = 0; rg < numRgs; rg++) {
-      await s.get(`/n_counts/c/${rg}` as AbsolutePath);
+      await s.get(`/n_counts/values/c/${rg}` as AbsolutePath);
     }
 
     expect(spy.getCalls).toBe(0);

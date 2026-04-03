@@ -174,7 +174,9 @@ async function renderFirstChunkTable(grp) {
   const columnData = [];
   for (const col of columns) {
     const colNode = await open(grp.resolve(col));
-    const isCategorical = colNode.attrs?.["encoding-type"] === "categorical";
+    const encodingType = colNode.attrs?.["encoding-type"];
+    const isCategorical = encodingType === "categorical";
+    const isNullable = encodingType === "nullable-integer" || encodingType === "nullable-string-array";
 
     let values;
     if (isCategorical) {
@@ -185,6 +187,15 @@ async function renderFirstChunkTable(grp) {
       const catsChunk = await get(catsArr);
       const categories = catsChunk.data;
       values = Array.from(codesChunk.data, (code) => categories[code]);
+    } else if (isNullable) {
+      const valuesArr = await open(grp.resolve(`${col}/values`), { kind: "array" });
+      const maskArr = await open(grp.resolve(`${col}/mask`), { kind: "array" });
+      const chunkSize = valuesArr.chunks[0];
+      const valuesChunk = await get(valuesArr, [slice(0, chunkSize)]);
+      const maskChunk = await get(maskArr, [slice(0, chunkSize)]);
+      const rawValues = Array.from(valuesChunk.data);
+      const mask = Array.from(maskChunk.data);
+      values = rawValues.map((v, i) => (mask[i] ? null : v));
     } else {
       const arr = await open(grp.resolve(col), { kind: "array" });
       const chunkSize = arr.chunks[0];

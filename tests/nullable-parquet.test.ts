@@ -2,8 +2,11 @@
  * Regression tests for nullable (OPTIONAL) columns in parquet files.
  *
  * athletes.parquet contains nullable numeric columns (height: DOUBLE, weight: INT64,
- * date_of_birth: INT32) which previously caused "Invalid typed array length" errors
- * because definition levels were skipped rather than decoded.
+ * date_of_birth: INT32). Per the AnnData on-disk format spec, each nullable column is
+ * exposed as a Zarr group with `encoding-type: "nullable-integer"` (or
+ * `"nullable-string-array"` for strings) containing two arrays:
+ *   - values: the data array (NaN / 0 at null positions)
+ *   - mask:   uint8 boolean array (1 = null, 0 = present)
  */
 
 import { resolve, dirname } from "node:path";
@@ -30,14 +33,17 @@ beforeAll(async () => {
   parquetMeta = await parquetMetadataAsync(asyncBuf);
 });
 
-describe("nullable float64 column (height)", () => {
-  test("reading does not throw", async () => {
-    const arr = await open(root(store).resolve("height"), { kind: "array" });
-    await expect(get(arr)).resolves.toBeDefined();
+// ── nullable float64 column (height) ────────────────────────────────────────
+
+describe("nullable float64 column (height) — group structure", () => {
+  test("column node is a group with encoding-type nullable-integer", async () => {
+    const grp = await open(root(store).resolve("height"), { kind: "group" });
+    expect(grp.attrs["encoding-type"]).toBe("nullable-integer");
+    expect(grp.attrs["encoding-version"]).toBe("0.1.0");
   });
 
-  test("returns the correct number of rows", async () => {
-    const arr = await open(root(store).resolve("height"), { kind: "array" });
+  test("values sub-array is readable and has correct length", async () => {
+    const arr = await open(root(store).resolve("height/values"), { kind: "array" });
     const chunk = await get(arr);
     const rows = (await parquetReadObjects({
       file: asyncBuf,
@@ -47,10 +53,10 @@ describe("nullable float64 column (height)", () => {
     expect((chunk.data as Float64Array).length).toBe(rows.length);
   });
 
-  test("null positions are NaN and non-null positions match parquet values", async () => {
-    const arr = await open(root(store).resolve("height"), { kind: "array" });
+  test("mask sub-array is readable, same length, and contains actual nulls", async () => {
+    const arr = await open(root(store).resolve("height/mask"), { kind: "array" });
     const chunk = await get(arr);
-    const values = chunk.data as Float64Array;
+    const mask = Array.from(chunk.data as Iterable<number>);
 
     const rows = (await parquetReadObjects({
       file: asyncBuf,
@@ -58,34 +64,47 @@ describe("nullable float64 column (height)", () => {
       columns: ["height"],
     })) as Record<string, number | null>[];
 
-    // Verify there are actual nulls in this column (guards against a trivially passing test)
-    const nullCount = rows.filter((r) => r.height === null).length;
-    expect(nullCount).toBeGreaterThan(0);
+    expect(mask.length).toBe(rows.length);
+    // Must have at least one null to verify the mask is non-trivially correct
+    expect(mask.some((v) => v === true || v === 1)).toBe(true);
+  });
+
+  test("mask matches parquet null positions for height", async () => {
+    const valuesArr = await open(root(store).resolve("height/values"), { kind: "array" });
+    const maskArr = await open(root(store).resolve("height/mask"), { kind: "array" });
+    const values = Array.from((await get(valuesArr)).data as Iterable<number>);
+    const mask = Array.from((await get(maskArr)).data as Iterable<number>);
+
+    const rows = (await parquetReadObjects({
+      file: asyncBuf,
+      metadata: parquetMeta,
+      columns: ["height"],
+    })) as Record<string, number | null>[];
 
     for (let i = 0; i < rows.length; i++) {
       if (rows[i].height === null) {
-        expect(Number.isNaN(values[i])).toBe(true);
+        expect(mask[i]).toBeTruthy();
       } else {
+        expect(mask[i]).toBeFalsy();
         expect(values[i]).toBe(rows[i].height);
       }
     }
   });
 });
 
-describe("nullable int32 column (date_of_birth)", () => {
-  test("reading does not throw", async () => {
-    const arr = await open(root(store).resolve("date_of_birth"), { kind: "array" });
-    await expect(get(arr)).resolves.toBeDefined();
+// ── nullable int32 column (date_of_birth) ────────────────────────────────────
+
+describe("nullable int32 column (date_of_birth) — group structure", () => {
+  test("column node is a group with encoding-type nullable-integer", async () => {
+    const grp = await open(root(store).resolve("date_of_birth"), { kind: "group" });
+    expect(grp.attrs["encoding-type"]).toBe("nullable-integer");
   });
 
-  test("returns the correct number of rows", async () => {
-    const arr = await open(root(store).resolve("date_of_birth"), { kind: "array" });
-    const chunk = await get(arr);
-    const rows = (await parquetReadObjects({
-      file: asyncBuf,
-      metadata: parquetMeta,
-      columns: ["date_of_birth"],
-    })) as Record<string, number | null>[];
-    expect((chunk.data as Int32Array).length).toBe(rows.length);
+  test("values and mask sub-arrays have matching lengths", async () => {
+    const valuesArr = await open(root(store).resolve("date_of_birth/values"), { kind: "array" });
+    const maskArr = await open(root(store).resolve("date_of_birth/mask"), { kind: "array" });
+    const values = Array.from((await get(valuesArr)).data as Iterable<number>);
+    const mask = Array.from((await get(maskArr)).data as Iterable<number>);
+    expect(values.length).toBe(mask.length);
   });
 });

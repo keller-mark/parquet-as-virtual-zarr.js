@@ -51,9 +51,13 @@ describe("multi-part root /zarr.json", () => {
 });
 
 describe("multi-part column metadata", () => {
-  test("numeric column zarr.json matches single-file", async () => {
-    const arrMulti = await open(root(multiStore).resolve("n_counts"), { kind: "array" });
-    const arrSingle = await open(root(singleStore).resolve("n_counts"), { kind: "array" });
+  test("numeric column nullable group zarr.json matches single-file", async () => {
+    const grpMulti = await open(root(multiStore).resolve("n_counts"), { kind: "group" });
+    const grpSingle = await open(root(singleStore).resolve("n_counts"), { kind: "group" });
+    expect(grpMulti.kind).toBe(grpSingle.kind);
+    expect(grpMulti.attrs).toEqual(grpSingle.attrs);
+    const arrMulti = await open(root(multiStore).resolve("n_counts/values"), { kind: "array" });
+    const arrSingle = await open(root(singleStore).resolve("n_counts/values"), { kind: "array" });
     expect(arrMulti.dtype).toBe(arrSingle.dtype);
     expect(arrMulti.shape).toEqual(arrSingle.shape);
     expect(arrMulti.attrs).toEqual(arrSingle.attrs);
@@ -95,7 +99,7 @@ describe("multi-part column metadata", () => {
 
 describe("multi-part numeric data", () => {
   test("n_counts values match single-file parquet", async () => {
-    const arr = await open(root(multiStore).resolve("n_counts"), { kind: "array" });
+    const arr = await open(root(multiStore).resolve("n_counts/values"), { kind: "array" });
     const chunk = await get(arr);
     const multiValues = Array.from(chunk.data as Float32Array);
     const rows = (await parquetReadObjects({
@@ -107,7 +111,7 @@ describe("multi-part numeric data", () => {
   });
 
   test("n_genes values match single-file parquet", async () => {
-    const arr = await open(root(multiStore).resolve("n_genes"), { kind: "array" });
+    const arr = await open(root(multiStore).resolve("n_genes/values"), { kind: "array" });
     const chunk = await get(arr);
     const multiValues = Array.from(chunk.data as Int32Array);
     const rows = (await parquetReadObjects({
@@ -220,7 +224,7 @@ describe("multi-part partial reads", () => {
     const spy = new MultiPartStoreSpy(MULTIPART_DIR);
     const s = ParquetAsAnnDataFrameStore.fromStore(spy);
     await open(root(s), { kind: "group" });
-    await s.get("/n_counts/c/0");
+    await s.get("/n_counts/values/c/0");
     expect(spy.getCalls).toBe(0);
   });
 
@@ -244,14 +248,14 @@ describe("multi-part partial reads", () => {
 
     // Read chunk from row group 0 → should read from part.0.parquet
     const before0 = spy.fetchCalls.length;
-    await s.get("/n_counts/c/0");
+    await s.get("/n_counts/values/c/0");
     const call0 = spy.fetchCalls.slice(before0);
     expect(call0.length).toBe(1);
     expect(call0[0].key).toBe("/part.0.parquet");
 
     // Read chunk from row group 2 → should read from part.2.parquet
     const before2 = spy.fetchCalls.length;
-    await s.get("/n_counts/c/2");
+    await s.get("/n_counts/values/c/2");
     const call2 = spy.fetchCalls.slice(before2);
     expect(call2.length).toBe(1);
     expect(call2[0].key).toBe("/part.2.parquet");
