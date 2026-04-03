@@ -46,13 +46,13 @@ pnpm publish --filter "parquet-as-virtual-zarr"
 
 ## Virtual arrow-to-zarr mapping
 
-### `/.zattrs` (Zarr v2) or `/zarr.json` (Zarr v3) attrs for root of dataframe
+### `/zarr.json` (Zarr v3) attrs for root of dataframe
 
 This should list the column names in the dataframe.
 
 ### Column mapping `/{colname}`
 
-#### Column attrs `/{colname}/.zattrs`
+#### Column attrs `/{colname}/zarr.json`
 
 This should list the `dtype` of the column and other properties of the column array, such as whether it uses dictionary encoding (categories+codes).
 
