@@ -1,5 +1,7 @@
 # parquet-as-virtual-zarr.js
 
+[![NPM](https://img.shields.io/npm/v/parquet-as-virtual-zarr.svg?color=black)](https://www.npmjs.com/package/parquet-as-virtual-zarr)
+
 Read Parquet data via the Zarr store interface.
 Given a Parquet file, we want to conceptually/virtually map its columns and row-groups to Zarr chunks.
 

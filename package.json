@@ -1,12 +1,16 @@
 {
   "name": "parquet-as-virtual-zarr",
   "version": "0.1.0",
+  "author": "",
+  "license": "MIT",
   "type": "module",
-  "private": true,
-  "exports": {
-    ".": "./src/index.ts"
-  },
+  "main": "dist/src/index.js",
+  "files": [
+    "src",
+    "dist"
+  ],
   "scripts": {
+    "build": "tsc",
     "generate-fixtures": "uv run fixtures/generate_fixtures.py",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
