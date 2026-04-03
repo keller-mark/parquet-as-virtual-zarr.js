@@ -424,6 +424,39 @@ export function extractZeroCopyPageData(
 }
 
 /**
+ * Expand a compact (non-null-only) array back to full length using definition levels.
+ * Null positions receive a type-appropriate fill value (NaN for floats, 0 for ints).
+ */
+function expandNullable(
+  compact: DecodedArray,
+  defLevels: number[],
+  parquetType: string,
+): DecodedArray {
+  const total = defLevels.length;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let result: any;
+  if (parquetType === "FLOAT") {
+    result = new Float32Array(total).fill(NaN);
+  } else if (parquetType === "DOUBLE") {
+    result = new Float64Array(total).fill(NaN);
+  } else if (parquetType === "INT32") {
+    result = new Int32Array(total);
+  } else if (parquetType === "INT64") {
+    result = new BigInt64Array(total);
+  } else {
+    result = new Array<Uint8Array>(total).fill(new Uint8Array(0));
+  }
+  let j = 0;
+  for (let i = 0; i < total; i++) {
+    if (defLevels[i] !== 0) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      result[i] = (compact as any)[j++];
+    }
+  }
+  return result as DecodedArray;
+}
+
+/**
  * Read and decode all values from a column chunk's raw bytes.
  * Handles dictionary-encoded, PLAIN-encoded, and optional (nullable) columns.
  * Returns typed array for numerics, string array for strings.
@@ -472,22 +505,31 @@ export async function readColumnChunkData(
         codec,
       );
       const pageReader = createReader(page);
-
-      // Skip definition levels for OPTIONAL columns
-      if (isOptional) {
-        const defLength = pageReader.view.getUint32(pageReader.offset, true);
-        pageReader.offset += 4 + defLength;
-      }
-
       const numValues = daph.num_values;
       const encoding = daph.encoding;
 
+      // Decode definition levels for OPTIONAL columns to determine which rows are non-null.
+      // Definition levels are RLE/bit-packed with bit-width 1 (0 = null, 1 = defined).
+      let defLevels: number[] | undefined;
+      if (isOptional) {
+        const defLength = pageReader.view.getUint32(pageReader.offset, true);
+        pageReader.offset += 4;
+        defLevels = new Array<number>(numValues).fill(1);
+        if (defLength > 0) {
+          readRleBitPackedHybrid(pageReader, 1, defLevels, defLength);
+        }
+      }
+      const nonNullCount = defLevels
+        ? defLevels.reduce((acc, l) => acc + (l !== 0 ? 1 : 0), 0)
+        : numValues;
+
       if (encoding === "PLAIN") {
-        const raw = readPlainValues(pageReader, parquetType, numValues);
+        const raw = readPlainValues(pageReader, parquetType, nonNullCount);
+        const expanded = defLevels ? expandNullable(raw, defLevels, parquetType) : raw;
         if (parquetType === "BYTE_ARRAY") {
-          allValues.push((raw as Uint8Array[]).map((b) => decoder.decode(b)));
+          allValues.push((expanded as Uint8Array[]).map((b) => decoder.decode(b)));
         } else {
-          allValues.push(raw);
+          allValues.push(expanded);
         }
       } else if (
         encoding === "RLE_DICTIONARY" ||
@@ -495,7 +537,7 @@ export async function readColumnChunkData(
       ) {
         const bw = page[pageReader.offset++] || 0;
         if (bw && dictionary) {
-          const indices = new Array<number>(numValues);
+          const indices = new Array<number>(nonNullCount);
           readRleBitPackedHybrid(
             pageReader,
             bw,
@@ -509,19 +551,21 @@ export async function readColumnChunkData(
             const Ctor = (dictionary as any).constructor as {
               new (len: number): Int32Array | Float32Array | Float64Array | BigInt64Array;
             };
-            const result = new Ctor(numValues);
-            for (let i = 0; i < numValues; i++) {
+            const result = new Ctor(nonNullCount);
+            for (let i = 0; i < nonNullCount; i++) {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               (result as any)[i] = (dictionary as any)[indices[i]];
             }
-            allValues.push(result);
+            const expanded = defLevels ? expandNullable(result, defLevels, parquetType) : result;
+            allValues.push(expanded);
           } else {
             // String dictionary
-            const result = new Array<string>(numValues);
-            for (let i = 0; i < numValues; i++) {
+            const result = new Array<string>(nonNullCount);
+            for (let i = 0; i < nonNullCount; i++) {
               result[i] = dictionary[indices[i]];
             }
-            allValues.push(result);
+            const expanded = defLevels ? expandNullable(result, defLevels, parquetType) : result;
+            allValues.push(expanded);
           }
         } else {
           // bitWidth 0 = all values are the first dictionary entry
