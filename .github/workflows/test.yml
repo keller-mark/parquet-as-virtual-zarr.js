@@ -28,6 +28,8 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm run generate-fixtures
       - run: pnpm run test
       - run: pnpm run typecheck
+      - run: pnpm exec playwright test
