@@ -62,9 +62,9 @@ For numeric (and other non-dictionary) columns, we lookup each row group using t
 
 For instance, if your Zarr store key was `/cell_type/0`, then this corresponds to the `cell_type` column of the Arrow table and the `0`th row group.
 
------
 
-### Related work:
+
+## Related work:
 - https://github.com/zarr-developers/zarr-extensions/pull/41
 - https://github.com/srivarra/zarrwhals
 - https://github.com/hypertidy/zaro
