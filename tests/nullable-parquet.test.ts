@@ -66,7 +66,7 @@ describe("nullable float64 column (height) — group structure", () => {
 
     expect(mask.length).toBe(rows.length);
     // Must have at least one null to verify the mask is non-trivially correct
-    expect(mask.some((v) => v === true || v === 1)).toBe(true);
+    expect(mask.some((v) => Boolean(v))).toBe(true);
   });
 
   test("mask matches parquet null positions for height", async () => {
