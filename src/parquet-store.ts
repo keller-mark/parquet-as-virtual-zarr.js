@@ -370,9 +370,9 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     for (let rg = 0; rg < this.#numRowGroups(); rg++) {
       const chunk = await this.#readColumnChunkForRg(colName, rg);
       if (ArrayBuffer.isView(chunk)) {
-        allValues.push(...Array.from(chunk as unknown as ArrayLike<unknown>));
+        for (const v of Array.from(chunk as unknown as ArrayLike<unknown>)) allValues.push(v);
       } else {
-        allValues.push(...chunk);
+        for (const v of chunk as unknown[]) allValues.push(v);
       }
     }
     return allValues;
