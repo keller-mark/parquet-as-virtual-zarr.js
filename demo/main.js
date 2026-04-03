@@ -170,7 +170,9 @@ async function renderFirstChunkTable(grp) {
   const columns = grp.attrs["column-order"] ?? [];
   if (columns.length === 0) return;
 
-  // For each column, read the first chunk.
+  const MAX_PREVIEW_ROWS = 10000;
+
+  // For each column, read the first chunk (up to MAX_PREVIEW_ROWS rows).
   const columnData = [];
   for (const col of columns) {
     const colNode = await open(grp.resolve(col));
@@ -182,24 +184,24 @@ async function renderFirstChunkTable(grp) {
     if (isCategorical) {
       const codesArr = await open(grp.resolve(`${col}/codes`), { kind: "array" });
       const catsArr = await open(grp.resolve(`${col}/categories`), { kind: "array" });
-      const chunkSize = codesArr.chunks[0];
-      const codesChunk = await get(codesArr, [slice(0, chunkSize)]);
+      const nRead = Math.min(codesArr.chunks[0], MAX_PREVIEW_ROWS);
+      const codesChunk = await get(codesArr, [slice(0, nRead)]);
       const catsChunk = await get(catsArr);
       const categories = catsChunk.data;
       values = Array.from(codesChunk.data, (code) => categories[code]);
     } else if (isNullable) {
       const valuesArr = await open(grp.resolve(`${col}/values`), { kind: "array" });
       const maskArr = await open(grp.resolve(`${col}/mask`), { kind: "array" });
-      const chunkSize = valuesArr.chunks[0];
-      const valuesChunk = await get(valuesArr, [slice(0, chunkSize)]);
-      const maskChunk = await get(maskArr, [slice(0, chunkSize)]);
+      const nRead = Math.min(valuesArr.chunks[0], MAX_PREVIEW_ROWS);
+      const valuesChunk = await get(valuesArr, [slice(0, nRead)]);
+      const maskChunk = await get(maskArr, [slice(0, nRead)]);
       const rawValues = Array.from(valuesChunk.data);
       const mask = Array.from(maskChunk.data);
       values = rawValues.map((v, i) => (mask[i] ? null : v));
     } else {
       const arr = await open(grp.resolve(col), { kind: "array" });
-      const chunkSize = arr.chunks[0];
-      const chunk = await get(arr, [slice(0, chunkSize)]);
+      const nRead = Math.min(arr.chunks[0], MAX_PREVIEW_ROWS);
+      const chunk = await get(arr, [slice(0, nRead)]);
       values = Array.from(chunk.data);
     }
     columnData.push({ col, values });
