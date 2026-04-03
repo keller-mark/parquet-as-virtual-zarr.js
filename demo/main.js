@@ -178,7 +178,7 @@ async function renderFirstChunkTable(grp) {
     const colNode = await open(grp.resolve(col));
     const encodingType = colNode.attrs?.["encoding-type"];
     const isCategorical = encodingType === "categorical";
-    const isNullable = encodingType === "nullable-integer" || encodingType === "nullable-string-array";
+    const isNullable = encodingType.startsWith("nullable");
 
     let values;
     if (isCategorical) {
