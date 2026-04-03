@@ -48,5 +48,7 @@ For instance, if your Zarr store key was `/cell_type/0`, then this corresponds t
 - https://github.com/zarr-developers/zarr-extensions/pull/41
 - https://github.com/srivarra/zarrwhals
 - https://github.com/hypertidy/zaro
+- https://github.com/keller-mark/hdf5-as-virtual-zarr.js
+- https://github.com/keller-mark/tiff-as-virtual-zarr.js
 
 Note: This is not an effort to read [Zarr as Arrow](https://github.com/datafusion-contrib/arrow-zarr/issues/36) (the reverse).
