@@ -26,6 +26,24 @@ console.log(arr.attrs);
 const arrData = await get(arr);
 ```
 
+## Development
+
+```sh
+pnpm install
+```
+
+Run unit tests:
+
+```sh
+pnpm run test
+```
+
+Publish:
+
+```sh
+pnpm publish --filter "parquet-as-virtual-zarr"
+```
+
 ## Virtual arrow-to-zarr mapping
 
 ### `/.zattrs` (Zarr v2) or `/zarr.json` (Zarr v3) attrs for root of dataframe
