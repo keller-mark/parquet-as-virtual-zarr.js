@@ -19,11 +19,11 @@
   },
   "dependencies": {
     "@uwdata/flechette": "^2.3.0",
-    "@zarrita/storage": "^0.1.4",
+    "@zarrita/storage": "^0.2.0",
     "d3-dsv": "^3.0.1",
     "hyparquet": "^1.25.1",
     "numcodecs": "^0.3.2",
-    "zarrita": "^0.6.1"
+    "zarrita": "^0.7.5"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
