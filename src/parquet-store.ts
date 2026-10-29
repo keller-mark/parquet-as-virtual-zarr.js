@@ -6,9 +6,7 @@ import {
   extractZeroCopyPageData,
   readColumnChunkData,
   readNullMask,
-  parsePageHeader,
 } from "./vendored/parquet-column.js";
-import { createReader } from "./vendored/thrift.js";
 // Side-effect import: registers the snappy codec with zarrita's registry
 import "./snappy-codec.js";
 
@@ -27,6 +25,16 @@ interface RgMapping {
 }
 
 /**
+ * How a column is exposed:
+ *   categorical → AnnData categorical group (codes + categories)
+ *   string      → vlen-utf8 string array (also used for the index column)
+ *   numeric     → numeric array (OPTIONAL floats included, with NaN for nulls)
+ *   bool        → bool array (REQUIRED BOOLEAN)
+ *   nullable    → AnnData nullable group (values + mask)
+ */
+type ColumnKind = "categorical" | "string" | "numeric" | "bool" | "nullable";
+
+/**
  * Virtual Zarr v3 store that exposes a Parquet file (or multi-part parquet
  * directory) as an AnnData-Zarr dataframe.
  *
@@ -38,15 +46,19 @@ interface RgMapping {
  *
  * Key routing (Zarr v3):
  *   /zarr.json                        → dataframe group metadata
- *   /{col}/zarr.json                  → array metadata (non-nullable, non-categorical) or group
- *   /{col}/c/{rg}                     → raw chunk bytes (non-nullable, non-categorical)
- *   /{col}/zarr.json                  → nullable group (encoding-type: nullable-integer / nullable-string-array)
+ *   /{col}/zarr.json                  → array metadata (string / numeric / bool) or group
+ *   /{col}/c/{rg}                     → chunk bytes (string / numeric / bool)
+ *   /{col}/zarr.json                  → nullable group (encoding-type: nullable-integer / nullable-boolean / nullable-string-array)
  *   /{col}/values/zarr.json           → values array metadata (nullable columns)
  *   /{col}/values/c/{rg}              → values chunk bytes (nullable columns)
  *   /{col}/mask/zarr.json             → mask array metadata (nullable columns, bool dtype)
+ *
+ * Nullable encodings follow the AnnData spec (nullable-integer, nullable-boolean,
+ * nullable-string-array with na-value "NA"). OPTIONAL FLOAT/DOUBLE columns are plain
+ * float arrays with NaN for nulls, since AnnData has no nullable float encoding.
  *   /{col}/mask/c/{rg}               → mask chunk bytes: 1=null, 0=present (nullable columns)
  *   /{col}/codes/zarr.json            → codes array metadata (categorical)
- *   /{col}/codes/c/{rg}              → codes chunk bytes (categorical)
+ *   /{col}/codes/c/{rg}              → codes chunk bytes, -1 for missing (categorical)
  *   /{col}/categories/zarr.json       → categories array metadata (categorical)
  *   /{col}/categories/c/0            → categories chunk bytes (vlen-utf8, categorical)
  */
@@ -59,10 +71,12 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
   #rgMap: RgMapping[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   #pandasMeta: any = null;
+  #kinds = new Map<string, ColumnKind>();
   #categoriesCache = new Map<string, string[]>();
   /**
    * Maps column name → zarr codec name for zero-copy compressed pass-through.
-   * Only set for columns that are REQUIRED + PLAIN + numeric + compressed.
+   * Only set for columns that are REQUIRED + PLAIN + numeric + compressed with
+   * a single data page per column chunk, in every row group of every part.
    * UNCOMPRESSED zero-copy columns are tracked in #zeroCopyRawCols.
    */
   #zeroCopyCompressedCols = new Map<string, string>();
@@ -153,6 +167,8 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
       globalRowOffset += rgs.reduce((sum: number, rg: any) => sum + Number(rg.num_rows), 0);
     }
 
+    this.#checkRegularChunks();
+
     // Extract pandas metadata from the first part.
     const firstMeta = this.#parts[0].metadata;
     const pandasKv = firstMeta.key_value_metadata?.find(
@@ -163,16 +179,33 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
       this.#pandasMeta = JSON.parse(pandasKv.value);
     }
 
-    // Determine zero-copy eligibility for each column.
+    this.#classifyColumns();
     this.#detectZeroCopyColumns();
 
     this.#initialized = true;
   }
 
   /**
-   * Check each column against zero-copy criteria (REQUIRED + PLAIN + numeric)
-   * and cache the result along with the compression codec.
+   * The virtual arrays use a regular chunk grid with chunk_shape = rows in
+   * row group 0, so every row group except the last must have exactly that
+   * many rows (and the last at most that many).
    */
+  #checkRegularChunks(): void {
+    const numRgs = this.#numRowGroups();
+    if (numRgs === 0) return;
+    const chunkSize = this.#rowsInGroup(0);
+    for (let g = 0; g < numRgs; g++) {
+      const rows = this.#rowsInGroup(g);
+      const ok = g < numRgs - 1 ? rows === chunkSize : rows > 0 && rows <= chunkSize;
+      if (!ok) {
+        throw new Error(
+          `ParquetAsAnnDataFrameStore: row groups must all have ${chunkSize} rows ` +
+            `(except a shorter final one), but row group ${g} has ${rows} rows`,
+        );
+      }
+    }
+  }
+
   /** Map parquet compression codec to zarr codec name for zero-copy. */
   static readonly #PARQUET_TO_ZARR_CODEC: Record<string, string> = {
     SNAPPY: "snappy",
@@ -182,28 +215,66 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     BROTLI: "brotli",
   };
 
-  #detectZeroCopyColumns(): void {
-    const rg0 = this.#parts[0].metadata.row_groups[0];
-    for (const colName of this.#columnNames()) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const schemaElement = this.#schema.find((s: any) => s.name === colName);
-      if (!schemaElement) continue;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const colChunk = rg0.columns.find((c: any) => c.meta_data.path_in_schema[0] === colName);
-      if (!colChunk) continue;
-      const meta = colChunk.meta_data;
+  /**
+   * True if the footer's encoding_stats guarantee a single data page and no
+   * dictionary page. Without encoding_stats this cannot be known up front.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  static #hasSingleDataPage(meta: any): boolean {
+    const stats = meta.encoding_stats;
+    if (!stats) return false;
+    let dataPages = 0;
+    for (const s of stats) {
+      if (s.page_type === "DICTIONARY_PAGE") return false;
+      if (s.page_type === "DATA_PAGE" || s.page_type === "DATA_PAGE_V2") dataPages += Number(s.count);
+    }
+    return dataPages === 1;
+  }
 
-      if (isZeroCopyEligible(schemaElement, meta)) {
-        const codec: string = meta.codec;
-        if (codec === "UNCOMPRESSED") {
-          this.#zeroCopyRawCols.add(colName);
-        } else {
-          const zarrCodec = ParquetAsAnnDataFrameStore.#PARQUET_TO_ZARR_CODEC[codec];
-          if (zarrCodec) {
-            this.#zeroCopyCompressedCols.set(colName, zarrCodec);
-          }
-        }
+  /**
+   * Check each numeric column against zero-copy criteria (REQUIRED + PLAIN +
+   * numeric, same codec everywhere) in every row group of every part, and
+   * cache the result along with the compression codec. Compressed columns
+   * additionally need a single data page per column chunk, since page payloads
+   * cannot be concatenated into one valid compressed stream.
+   */
+  #detectZeroCopyColumns(): void {
+    for (const colName of this.#columnNames()) {
+      if (this.#kinds.get(colName) !== "numeric") continue;
+      const schemaElement = this.#schemaElement(colName);
+      let codec: string | null = null;
+      let eligible = true;
+      for (let g = 0; g < this.#numRowGroups() && eligible; g++) {
+        const { meta } = this.#getColumnMeta(colName, g);
+        if (!meta || !isZeroCopyEligible(schemaElement, meta)) eligible = false;
+        else if (codec !== null && meta.codec !== codec) eligible = false;
+        else if (meta.codec !== "UNCOMPRESSED" && !ParquetAsAnnDataFrameStore.#hasSingleDataPage(meta)) eligible = false;
+        else codec = meta.codec;
       }
+      if (!eligible || codec === null) continue;
+      if (codec === "UNCOMPRESSED") {
+        this.#zeroCopyRawCols.add(colName);
+      } else {
+        const zarrCodec = ParquetAsAnnDataFrameStore.#PARQUET_TO_ZARR_CODEC[codec];
+        if (zarrCodec) this.#zeroCopyCompressedCols.set(colName, zarrCodec);
+      }
+    }
+  }
+
+  /** Assign each column the kind it is exposed as (see ColumnKind). */
+  #classifyColumns(): void {
+    const catCols = this.#categoricalColumnNames();
+    const indexCol = this.#indexColumnName();
+    for (const col of this.#columnNames()) {
+      const schema = this.#schemaElement(col);
+      let kind: ColumnKind;
+      if (catCols.has(col)) kind = "categorical";
+      else if (col === indexCol) kind = "string";
+      else if (schema.repetition_type === "OPTIONAL" && !this.#isFloat(col)) kind = "nullable";
+      else if (this.#parquetTypeToDtype(col) !== "|O") kind = "numeric";
+      else if (schema.type === "BOOLEAN") kind = "bool";
+      else kind = "string";
+      this.#kinds.set(col, kind);
     }
   }
 
@@ -211,6 +282,12 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   get #schema(): any[] {
     return this.#parts[0].metadata.schema;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  #schemaElement(colName: string): any {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return this.#schema.find((s: any) => s.type && s.name === colName);
   }
 
   /** All column names from parquet schema (leaf elements only). */
@@ -239,10 +316,7 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
   }
 
   #parquetTypeToDataType(colName: string): string {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const schema = this.#schema.find((s: any) => s.name === colName);
-    if (!schema) return "string";
-    switch (schema.type) {
+    switch (this.#schemaElement(colName)?.type) {
       case "FLOAT":  return "float32";
       case "DOUBLE": return "float64";
       case "INT32":  return "int32";
@@ -252,16 +326,18 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
   }
 
   #parquetTypeToDtype(colName: string): string {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const schema = this.#schema.find((s: any) => s.name === colName);
-    if (!schema) return "|O";
-    switch (schema.type) {
+    switch (this.#schemaElement(colName)?.type) {
       case "FLOAT":  return "<f4";
       case "DOUBLE": return "<f8";
       case "INT32":  return "<i4";
       case "INT64":  return "<i8";
       default:       return "|O";
     }
+  }
+
+  #isFloat(colName: string): boolean {
+    const type = this.#schemaElement(colName)?.type;
+    return type === "FLOAT" || type === "DOUBLE";
   }
 
   #totalRows(): number {
@@ -295,7 +371,7 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     const rg = part.metadata.row_groups[mapping.localRgIndex];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const colChunk = rg.columns.find((c: any) => c.meta_data.path_in_schema[0] === colName);
-    return { part, meta: colChunk.meta_data };
+    return { part, meta: colChunk?.meta_data };
   }
 
   /**
@@ -318,72 +394,104 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     return bytes;
   }
 
-  /**
-   * Read one column from a specific row group.
-   *
-   * For zero-copy eligible columns (REQUIRED + PLAIN + numeric):
-   *   Returns raw bytes (compressed or uncompressed) with page headers stripped.
-   *   The zarr codec pipeline handles decompression.
-   *
-   * For other columns:
-   *   Decodes the column data using vendored parquet decoding logic.
-   *   Returns typed array for numerics, string array for strings.
-   */
+  /** Decode one column chunk to one value per row (nulls → placeholders). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async #readColumnChunkForRg(colName: string, rgIndex: number): Promise<any> {
-    const rawBytes = await this.#fetchColumnChunkBytes(colName, rgIndex);
+  async #decodeColumnChunk(colName: string, rawBytes: Uint8Array, rgIndex: number): Promise<any> {
     const { meta } = this.#getColumnMeta(colName, rgIndex);
-
-    // Zero-copy path: return raw page data bytes directly
-    const zarrCodec = this.#zeroCopyCompressedCols.get(colName);
-    if (zarrCodec || this.#zeroCopyRawCols.has(colName)) {
-      const pageData = extractZeroCopyPageData(rawBytes);
-      if (pageData !== null) {
-        if (zarrCodec === "lz4_raw") {
-          // LZ4 raw blocks need a size prefix so the zarr codec knows the output size.
-          // Prepend 4-byte LE uncompressed size (from page header).
-          const headerReader = createReader(rawBytes);
-          const header = parsePageHeader(headerReader);
-          const prefixed = new Uint8Array(4 + pageData.byteLength);
-          new DataView(prefixed.buffer).setUint32(0, header.uncompressed_page_size, true);
-          prefixed.set(pageData, 4);
-          return prefixed;
-        }
-        return pageData;
-      }
-      // Multi-page fallback: decode normally
-    }
-
-    // Decode path: use vendored column reader
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const schemaElement = this.#schema.find((s: any) => s.name === colName);
-    const isOptional = schemaElement?.repetition_type !== "REQUIRED";
+    const isOptional = this.#schemaElement(colName)?.repetition_type !== "REQUIRED";
     return await readColumnChunkData(rawBytes, meta.codec, meta.type, isOptional);
   }
 
   /**
-   * Read all values for a column across all parts/row groups.
-   * Always returns a flat array of values (for category extraction).
+   * Read one column from a specific row group as the bytes of a Zarr chunk
+   * (for numeric, bool, and nullable-values arrays).
+   *
+   * For zero-copy eligible columns (REQUIRED + PLAIN + numeric):
+   *   Returns raw page bytes (compressed or uncompressed) with page headers
+   *   stripped. The zarr codec pipeline handles decompression.
+   *
+   * For other columns:
+   *   Decodes the column data using vendored parquet decoding logic and
+   *   returns little-endian bytes, or vlen-utf8 bytes for strings.
    */
-  async #readAllColumnValues(colName: string): Promise<unknown[]> {
-    const allValues: unknown[] = [];
-    for (let rg = 0; rg < this.#numRowGroups(); rg++) {
-      const chunk = await this.#readColumnChunkForRg(colName, rg);
-      if (ArrayBuffer.isView(chunk)) {
-        for (const v of Array.from(chunk as unknown as ArrayLike<unknown>)) allValues.push(v);
-      } else {
-        for (const v of chunk as unknown[]) allValues.push(v);
+  async #readValuesChunk(colName: string, rgIndex: number): Promise<Uint8Array> {
+    const rawBytes = await this.#fetchColumnChunkBytes(colName, rgIndex);
+
+    // Zero-copy path: return raw page data bytes directly
+    const zarrCodec = this.#zeroCopyCompressedCols.get(colName);
+    if (zarrCodec || this.#zeroCopyRawCols.has(colName)) {
+      const page = extractZeroCopyPageData(rawBytes);
+      const v2 = page?.header.data_page_header_v2;
+      const uncompressedV2 = page?.header.type === "DATA_PAGE_V2" && v2?.is_compressed === false;
+      if (page && !(zarrCodec && uncompressedV2)) {
+        if (zarrCodec === "lz4_raw") {
+          // LZ4 raw blocks need a size prefix so the zarr codec knows the output size.
+          // Prepend 4-byte LE uncompressed size (from page header).
+          const prefixed = new Uint8Array(4 + page.data.byteLength);
+          new DataView(prefixed.buffer).setUint32(0, page.header.uncompressed_page_size, true);
+          prefixed.set(page.data, 4);
+          return prefixed;
+        }
+        return page.data;
       }
+      if (zarrCodec) {
+        // The metadata declares a compression codec, so decoded bytes would be
+        // misread. encoding_stats promised a single compressed data page.
+        throw new Error(
+          `ParquetAsAnnDataFrameStore: column=${colName} rg=${rgIndex} does not contain ` +
+            `a single compressed data page, contradicting its encoding_stats`,
+        );
+      }
+      // Uncompressed multi-page fallback: decoded bytes match the [bytes] pipeline
     }
-    return allValues;
+
+    const data = await this.#decodeColumnChunk(colName, rawBytes, rgIndex);
+    if (ArrayBuffer.isView(data)) {
+      return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    }
+    return this.#encodeVlenUtf8(data as (string | null)[]);
+  }
+
+  /** Read a string-kind chunk, stringifying non-string values (numeric index). */
+  async #readStringChunk(colName: string, rgIndex: number): Promise<Uint8Array> {
+    const rawBytes = await this.#fetchColumnChunkBytes(colName, rgIndex);
+    const data = await this.#decodeColumnChunk(colName, rawBytes, rgIndex);
+    const strings = Array.from(data as ArrayLike<unknown>, (v) =>
+      v === null || v === undefined ? "" : typeof v === "string" ? v : String(v),
+    );
+    return this.#encodeVlenUtf8(strings);
+  }
+
+  /**
+   * Decode one row group of a categorical column, with null (missing) at
+   * positions whose definition level is 0.
+   */
+  async #readCategoricalValues(colName: string, rgIndex: number): Promise<unknown[]> {
+    const rawBytes = await this.#fetchColumnChunkBytes(colName, rgIndex);
+    const data = await this.#decodeColumnChunk(colName, rawBytes, rgIndex);
+    const values: unknown[] = Array.from(data as ArrayLike<unknown>);
+    const schema = this.#schemaElement(colName);
+    // Strings already decode to null at missing positions; numeric
+    // placeholders (NaN / 0) need the definition levels to tell them apart.
+    if (schema?.repetition_type === "OPTIONAL" && schema.type !== "BYTE_ARRAY") {
+      const { meta } = this.#getColumnMeta(colName, rgIndex);
+      const mask = await readNullMask(rawBytes, meta.codec, this.#rowsInGroup(rgIndex));
+      for (let i = 0; i < values.length; i++) if (mask[i]) values[i] = null;
+    }
+    return values;
   }
 
   async #getCategories(colName: string): Promise<string[]> {
     if (this.#categoriesCache.has(colName)) {
       return this.#categoriesCache.get(colName)!;
     }
-    const allValues = await this.#readAllColumnValues(colName);
-    const categories = [...new Set(allValues as string[])].sort();
+    const distinct = new Set<unknown>();
+    for (let rg = 0; rg < this.#numRowGroups(); rg++) {
+      for (const v of await this.#readCategoricalValues(colName, rg)) {
+        if (v !== null) distinct.add(v);
+      }
+    }
+    const categories = [...distinct].sort() as string[];
     this.#categoriesCache.set(colName, categories);
     return categories;
   }
@@ -479,7 +587,7 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     };
   }
 
-  #stringArrayMeta(colName: string, encodingType: string): Record<string, unknown> {
+  #stringArrayMeta(encodingType: string): Record<string, unknown> {
     const numRows = this.#totalRows();
     const maxRowsPerRg = this.#rowsInGroup(0);
     return {
@@ -495,39 +603,11 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     };
   }
 
-  /** True if the parquet column is OPTIONAL (i.e. nullable). */
-  #isNullable(colName: string): boolean {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const schema = this.#schema.find((s: any) => s.name === colName);
-    return schema?.repetition_type === "OPTIONAL";
-  }
-
-  /** True if the parquet column has BOOLEAN type. */
-  #isBoolean(colName: string): boolean {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const schema = this.#schema.find((s: any) => s.name === colName);
-    return schema?.type === "BOOLEAN";
-  }
-
-  /** AnnData nullable encoding-type string for a column. */
-  #nullableEncodingType(colName: string): string {
-    if (this.#isBoolean(colName)) return "nullable-boolean";
-    if (this.#parquetTypeToDtype(colName) === "|O") return "nullable-string-array";
-    return "nullable-integer";
-  }
-
-  #nullableGroupMeta(encodingType: string): Record<string, unknown> {
-    return {
-      zarr_format: 3,
-      node_type: "group",
-      attributes: {
-        "encoding-type": encodingType,
-        "encoding-version": "0.1.0",
-      },
-    };
-  }
-
-  #maskArrayMeta(): Record<string, unknown> {
+  /**
+   * Bool array, used for REQUIRED BOOLEAN columns and for the values and mask
+   * members of nullable groups. AnnData writes all of these as encoding-type "array".
+   */
+  #boolArrayMeta(): Record<string, unknown> {
     const numRows = this.#totalRows();
     const maxRowsPerRg = this.#rowsInGroup(0);
     return {
@@ -539,8 +619,39 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
       chunk_key_encoding: { name: "default", configuration: { separator: "/" } },
       fill_value: false,
       codecs: [{ name: "bytes", configuration: { endian: "little" } }],
-      attributes: {},
+      attributes: { "encoding-type": "array", "encoding-version": "0.2.0" },
     };
+  }
+
+  /**
+   * AnnData nullable encoding-type string for a column. OPTIONAL FLOAT/DOUBLE
+   * columns never reach here: AnnData has no nullable float encoding, so they
+   * are plain float arrays with NaN for nulls.
+   */
+  #nullableEncodingType(colName: string): string {
+    if (this.#schemaElement(colName)?.type === "BOOLEAN") return "nullable-boolean";
+    if (this.#parquetTypeToDtype(colName) === "|O") return "nullable-string-array";
+    return "nullable-integer";
+  }
+
+  #nullableGroupMeta(encodingType: string): Record<string, unknown> {
+    return {
+      zarr_format: 3,
+      node_type: "group",
+      attributes: {
+        // Parquet nulls compare as missing (NA), not as a never-equal value (NaN)
+        ...(encodingType === "nullable-string-array" ? { "na-value": "NA" } : {}),
+        "encoding-type": encodingType,
+        "encoding-version": "0.1.0",
+      },
+    };
+  }
+
+  #nullableValuesMeta(colName: string): Record<string, unknown> {
+    const encodingType = this.#nullableEncodingType(colName);
+    if (encodingType === "nullable-boolean") return this.#boolArrayMeta();
+    if (encodingType === "nullable-string-array") return this.#stringArrayMeta("string-array");
+    return this.#numericArrayMeta(colName);
   }
 
   async #readMaskForRg(colName: string, rgIndex: number): Promise<Uint8Array> {
@@ -595,6 +706,17 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     };
   }
 
+  /** Metadata document at /{col}/zarr.json. */
+  #columnMeta(colName: string): Record<string, unknown> {
+    switch (this.#kinds.get(colName)) {
+      case "categorical": return this.#categoricalGroupMeta();
+      case "nullable":    return this.#nullableGroupMeta(this.#nullableEncodingType(colName));
+      case "numeric":     return this.#numericArrayMeta(colName);
+      case "bool":        return this.#boolArrayMeta();
+      default:            return this.#stringArrayMeta("string-array");
+    }
+  }
+
   /**
    * Build virtual consolidated metadata matching zarr v3 format.
    * Returns the full root zarr.json with inline consolidated_metadata.
@@ -602,42 +724,24 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
   async getConsolidatedMetadata(): Promise<Record<string, unknown>> {
     await this.#init();
 
-    const catCols = this.#categoricalColumnNames();
-    const allCols = this.#columnNames();
     const metadata: Record<string, unknown> = {};
 
-    for (const col of allCols) {
-      const isIndex = col === this.#indexColumnName();
-      const dtype = this.#parquetTypeToDtype(col);
-      const isNullable = !catCols.has(col) && !isIndex && this.#isNullable(col);
-
-      if (catCols.has(col)) {
-        // Categorical column → group with nested consolidated_metadata
+    for (const col of this.#columnNames()) {
+      const kind = this.#kinds.get(col);
+      if (kind === "categorical" || kind === "nullable") {
         metadata[col] = {
-          ...this.#categoricalGroupMeta(),
+          ...this.#columnMeta(col),
           consolidated_metadata: { kind: "inline", must_understand: false, metadata: {} },
         };
+      } else {
+        metadata[col] = this.#columnMeta(col);
+      }
+      if (kind === "categorical") {
         metadata[`${col}/codes`] = await this.#codesArrayMeta(col);
         metadata[`${col}/categories`] = await this.#categoriesArrayMeta(col);
-      } else if (isNullable) {
-        // Nullable column → nullable group with values + mask sub-arrays
-        const encodingType = this.#nullableEncodingType(col);
-        metadata[col] = {
-          ...this.#nullableGroupMeta(encodingType),
-          consolidated_metadata: { kind: "inline", must_understand: false, metadata: {} },
-        };
-        metadata[`${col}/values`] = this.#isBoolean(col)
-          ? this.#maskArrayMeta()
-          : dtype === "|O"
-            ? this.#stringArrayMeta(col, "string-array")
-            : this.#numericArrayMeta(col);
-        metadata[`${col}/mask`] = this.#maskArrayMeta();
-      } else {
-        if (isIndex || dtype === "|O") {
-          metadata[col] = this.#stringArrayMeta(col, "string-array");
-        } else {
-          metadata[col] = this.#numericArrayMeta(col);
-        }
+      } else if (kind === "nullable") {
+        metadata[`${col}/values`] = this.#nullableValuesMeta(col);
+        metadata[`${col}/mask`] = this.#boolArrayMeta();
       }
     }
 
@@ -669,6 +773,14 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     return data.slice(range.offset, range.offset + range.length);
   }
 
+  /** Parse a chunk index, returning undefined unless it is a valid row group index. */
+  #rgIndex(part: string): number | undefined {
+    const rgIndex = Number(part);
+    return Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < this.#numRowGroups()
+      ? rgIndex
+      : undefined;
+  }
+
   async #route(key: string): Promise<Uint8Array | undefined> {
     if (key === "/zarr.json") {
       return this.#json(this.#rootGroupMeta());
@@ -678,115 +790,57 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
     if (parts.length < 2) return undefined;
 
     const colName = parts[0];
-    const allCols = new Set(this.#columnNames());
-    if (!allCols.has(colName)) return undefined;
-
-    const catCols = this.#categoricalColumnNames();
-    const isCat = catCols.has(colName);
-    const isIndex = colName === this.#indexColumnName();
-    const dtype = this.#parquetTypeToDtype(colName);
-    const numRgs = this.#numRowGroups();
-    const isNullable = !isCat && !isIndex && this.#isNullable(colName);
+    const kind = this.#kinds.get(colName);
+    if (!kind) return undefined;
 
     // /{col}/zarr.json
     if (parts.length === 2 && parts[1] === "zarr.json") {
-      if (isCat) return this.#json(this.#categoricalGroupMeta());
-      if (isNullable) return this.#json(this.#nullableGroupMeta(this.#nullableEncodingType(colName)));
-      if (isIndex || dtype === "|O") return this.#json(this.#stringArrayMeta(colName, "string-array"));
-      return this.#json(this.#numericArrayMeta(colName));
+      return this.#json(this.#columnMeta(colName));
     }
 
-    // /{col}/c/{rg} — non-nullable, non-categorical columns only
-    if (parts.length === 3 && parts[1] === "c" && !isCat && !isNullable) {
-      const rgIndex = Number(parts[2]);
-      if (Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < numRgs) {
-        const chunkData = await this.#readColumnChunkForRg(colName, rgIndex);
-        if (chunkData instanceof Uint8Array) {
-          // Zero-copy path or already-encoded bytes — return directly
-          return chunkData;
-        }
-        if (ArrayBuffer.isView(chunkData)) {
-          // Typed array from decoded numerics — return raw bytes
-          const ta = chunkData as ArrayBufferView;
-          return new Uint8Array(ta.buffer, ta.byteOffset, ta.byteLength);
-        }
-        if (dtype === "|O") return this.#encodeVlenUtf8(chunkData as string[]);
-        // Plain array of numbers (dictionary-encoded) — encode to typed array
-        return this.#encodeTypedArray(chunkData as number[], dtype);
-      }
+    // /{col}/c/{rg} — array-kind columns only
+    if (parts.length === 3 && parts[1] === "c") {
+      const rgIndex = this.#rgIndex(parts[2]);
+      if (rgIndex === undefined) return undefined;
+      if (kind === "string") return this.#readStringChunk(colName, rgIndex);
+      if (kind === "numeric" || kind === "bool") return this.#readValuesChunk(colName, rgIndex);
+      return undefined;
     }
+
+    if (parts.length !== 3 && parts.length !== 4) return undefined;
+    const subGroup = parts[1];
+    const isMeta = parts.length === 3 && parts[2] === "zarr.json";
+    const rgIndex = parts.length === 4 && parts[2] === "c" ? this.#rgIndex(parts[3]) : undefined;
 
     // /{col}/values/… and /{col}/mask/… — nullable columns
-    if (isNullable) {
-      const subGroup = parts[1];
-
+    if (kind === "nullable") {
       if (subGroup === "values") {
-        if (parts.length === 3 && parts[2] === "zarr.json") {
-          if (this.#isBoolean(colName)) return this.#json(this.#maskArrayMeta());
-          if (dtype === "|O") return this.#json(this.#stringArrayMeta(colName, "string-array"));
-          return this.#json(this.#numericArrayMeta(colName));
-        }
-        if (parts.length === 4 && parts[2] === "c") {
-          const rgIndex = Number(parts[3]);
-          if (Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < numRgs) {
-            const chunkData = await this.#readColumnChunkForRg(colName, rgIndex);
-            if (chunkData instanceof Uint8Array) return chunkData;
-            if (ArrayBuffer.isView(chunkData)) {
-              const ta = chunkData as ArrayBufferView;
-              return new Uint8Array(ta.buffer, ta.byteOffset, ta.byteLength);
-            }
-            if (dtype === "|O") return this.#encodeVlenUtf8(chunkData as string[]);
-            return this.#encodeTypedArray(chunkData as number[], dtype);
-          }
-        }
+        if (isMeta) return this.#json(this.#nullableValuesMeta(colName));
+        if (rgIndex !== undefined) return this.#readValuesChunk(colName, rgIndex);
       }
-
       if (subGroup === "mask") {
-        if (parts.length === 3 && parts[2] === "zarr.json") {
-          return this.#json(this.#maskArrayMeta());
-        }
-        if (parts.length === 4 && parts[2] === "c") {
-          const rgIndex = Number(parts[3]);
-          if (Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < numRgs) {
-            return await this.#readMaskForRg(colName, rgIndex);
-          }
-        }
+        if (isMeta) return this.#json(this.#boolArrayMeta());
+        if (rgIndex !== undefined) return this.#readMaskForRg(colName, rgIndex);
       }
     }
 
-    if (isCat) {
-      const subGroup = parts[1];
-
+    if (kind === "categorical") {
       if (subGroup === "codes") {
-        if (parts.length === 3 && parts[2] === "zarr.json") {
-          return this.#json(await this.#codesArrayMeta(colName));
-        }
-        if (parts.length === 4 && parts[2] === "c") {
-          const rgIndex = Number(parts[3]);
-          if (Number.isInteger(rgIndex) && rgIndex >= 0 && rgIndex < numRgs) {
-            const chunkData = await this.#readColumnChunkForRg(colName, rgIndex);
-            const values = Array.isArray(chunkData)
-              ? chunkData as string[]
-              : Array.from(chunkData as ArrayLike<string>);
-            const categories = await this.#getCategories(colName);
-            const catMap = new Map(categories.map((c, i) => [c, i]));
-            const codes = values.map((v) => catMap.get(v) ?? 0);
-            const codeDtype = this.#codeDtype(categories.length);
-            return this.#encodeTypedArray(codes, codeDtype);
-          }
+        if (isMeta) return this.#json(await this.#codesArrayMeta(colName));
+        if (rgIndex !== undefined) {
+          const values = await this.#readCategoricalValues(colName, rgIndex);
+          const categories = await this.#getCategories(colName);
+          const catMap = new Map<unknown, number>(categories.map((c, i) => [c, i]));
+          // AnnData uses -1 for missing categorical values
+          const codes = values.map((v) => (v === null ? -1 : catMap.get(v) ?? -1));
+          return this.#encodeTypedArray(codes, this.#codeDtype(categories.length));
         }
       }
 
       if (subGroup === "categories") {
-        if (parts.length === 3 && parts[2] === "zarr.json") {
-          return this.#json(await this.#categoriesArrayMeta(colName));
-        }
-        if (parts.length === 4 && parts[2] === "c") {
-          const rgIndex = Number(parts[3]);
-          if (Number.isInteger(rgIndex) && rgIndex === 0) {
-            const categories = await this.#getCategories(colName);
-            return this.#encodeVlenUtf8(categories);
-          }
+        if (isMeta) return this.#json(await this.#categoriesArrayMeta(colName));
+        if (parts.length === 4 && parts[2] === "c" && parts[3] === "0") {
+          return this.#encodeVlenUtf8(await this.#getCategories(colName));
         }
       }
     }

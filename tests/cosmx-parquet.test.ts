@@ -4,6 +4,7 @@
  * The file has one row group (943 272 rows) and a mix of:
  *   - categorical columns   : target, cell_ID  (pandas_type = "categorical")
  *   - nullable numeric cols : x, y, fov, x_global_px, z_raw, y_global_px
+ *     (floats are plain arrays with NaN for nulls; ints are nullable-integer groups)
  *   - nullable string col   : CellComp
  *   - index column          : __null_dask_index__ (excluded from column-order)
  *
@@ -58,8 +59,24 @@ describe("categorical columns", () => {
   }
 });
 
-describe("nullable numeric columns", () => {
-  for (const col of ["x", "y", "fov", "x_global_px", "z_raw", "y_global_px"]) {
+describe("nullable float columns", () => {
+  for (const col of ["x", "y", "x_global_px", "y_global_px"]) {
+    test(`${col}: is a float64 array with encoding-type array`, async () => {
+      const arr = await open(grp.resolve(col), { kind: "array" });
+      expect(arr.dtype).toBe("float64");
+      expect(arr.attrs["encoding-type"]).toBe("array");
+    });
+
+    test(`${col}: first chunk has correct length`, async () => {
+      const arr = await open(grp.resolve(col), { kind: "array" });
+      const chunk = await get(arr, [slice(0, arr.chunks[0])]);
+      expect((chunk.data as Float64Array).length).toBe(NUM_ROWS);
+    });
+  }
+});
+
+describe("nullable integer columns", () => {
+  for (const col of ["fov", "z_raw"]) {
     test(`${col}: encoding-type is nullable-integer`, async () => {
       const colNode = await open(grp.resolve(col));
       expect(colNode.attrs?.["encoding-type"]).toBe("nullable-integer");

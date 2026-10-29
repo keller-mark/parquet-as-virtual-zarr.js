@@ -27,7 +27,7 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
   #categoriesCache = new Map<string, string[]>();
   /**
    * Dictionary-encoded columns whose dictionary values are already sorted
-   * (ascending, no duplicates) and shared across all batches.
+   * (ascending, no duplicates) and shared across all batches, with no nulls.
    * For these columns, Arrow index buffers can be passed through directly
    * as Zarr codes without remapping.
    */
@@ -52,7 +52,8 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
   /**
    * Detect dictionary-encoded columns that can use zero-copy code pass-through.
    * Eligible when: all batches share the same dictionary AND dictionary values
-   * are strictly sorted ascending (no duplicates).
+   * are strictly sorted ascending (no duplicates) AND no row is null (the index
+   * buffer holds arbitrary values at null rows, but missing codes must be -1).
    */
   #detectZeroCopy(): void {
     const catCols = this.#categoricalColumnNames();
@@ -64,10 +65,10 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
       const dict0 = col.data[0].dictionary;
       if (!dict0 || dict0.length === 0) continue;
 
-      // All batches must share the same dictionary reference
+      // All batches must share the same dictionary reference and have no nulls
       let eligible = true;
-      for (let b = 1; b < col.data.length; b++) {
-        if (col.data[b].dictionary !== dict0) { eligible = false; break; }
+      for (let b = 0; b < col.data.length; b++) {
+        if (col.data[b].dictionary !== dict0 || col.data[b].nullCount > 0) { eligible = false; break; }
       }
       if (!eligible) continue;
 
@@ -183,6 +184,11 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
   #readNumericBatch(colName: string, batchIndex: number): Uint8Array {
     const col = this.#getColumn(colName);
     const batch = col.data[batchIndex];
+    if (col.type.typeId === Type.Float && col.type.precision === Precision.HALF) {
+      // Zarr has no float16 here: widen to the declared float32
+      const widened = Float32Array.from({ length: batch.length }, (_, i) => batch.value(i));
+      return new Uint8Array(widened.buffer);
+    }
     const values = batch.values;
     return new Uint8Array(values.buffer, values.byteOffset, batch.length * values.BYTES_PER_ELEMENT);
   }
@@ -219,48 +225,53 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
         this.#categoriesCache.set(colName, categories);
         return categories;
       }
-      // Extract dictionary values, deduplicate, and sort
-      const values: string[] = [];
-      for (let i = 0; i < dict.length; i++) {
-        values.push(dict.at(i));
+      // Union the values of every distinct batch dictionary (batches may carry
+      // replacement or delta dictionaries), deduplicate, and sort
+      const values = new Set<string>();
+      const seen = new Set<unknown>();
+      for (const batch of col.data) {
+        if (seen.has(batch.dictionary)) continue;
+        seen.add(batch.dictionary);
+        for (let i = 0; i < batch.dictionary.length; i++) {
+          const v = batch.dictionary.at(i);
+          if (v !== null) values.add(v);
+        }
       }
-      const categories = [...new Set(values)].sort();
+      const categories = [...values].sort();
       this.#categoriesCache.set(colName, categories);
       return categories;
     }
-    // Non-dictionary categorical: read all values and compute unique sorted set
-    const allValues: string[] = [];
-    for (let b = 0; b < this.#numBatches(); b++) {
-      allValues.push(...this.#readStringBatch(colName, b));
+    // Non-dictionary categorical: read all non-null values and compute unique sorted set
+    const allValues = new Set<string>();
+    for (const batch of col.data) {
+      for (let i = 0; i < batch.length; i++) {
+        const v = batch.at(i);
+        if (v !== null) allValues.add(String(v));
+      }
     }
-    const categories = [...new Set(allValues)].sort();
+    const categories = [...allValues].sort();
     this.#categoriesCache.set(colName, categories);
     return categories;
   }
 
   /**
-   * Read integer codes for a dictionary column batch, remapped to sorted categories.
+   * Read integer codes for a categorical column batch, remapped to sorted
+   * categories. Missing (null) rows get -1, as in AnnData.
    */
   #readCodesBatch(colName: string, batchIndex: number): number[] {
     const col = this.#getColumn(colName);
     const batch = col.data[batchIndex];
     const categories = this.#getCategories(colName);
     const catMap = new Map(categories.map((c, i) => [c, i]));
+    const isDict = col.type.typeId === Type.Dictionary;
 
-    if (col.type.typeId === Type.Dictionary) {
-      // Remap Arrow dictionary indices to sorted category indices
-      const dict = batch.dictionary;
-      const codes: number[] = [];
-      for (let i = 0; i < batch.length; i++) {
-        const key = batch.values[i];
-        const value = dict.at(key);
-        codes.push(catMap.get(value) ?? 0);
-      }
-      return codes;
+    const codes: number[] = [];
+    for (let i = 0; i < batch.length; i++) {
+      // Dictionary batches decode indices through their own dictionary
+      const value = batch.at(i);
+      codes.push(value === null ? -1 : catMap.get(isDict ? value : String(value)) ?? -1);
     }
-    // Non-dictionary: read strings and map to category indices
-    const strings = this.#readStringBatch(colName, batchIndex);
-    return strings.map((v) => catMap.get(v) ?? 0);
+    return codes;
   }
 
   // ── Encoding helpers ────────────────────────────────────────────────────
@@ -299,30 +310,23 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
 
   #codeDataType(colName: string, numCategories: number): string {
     if (this.#zeroCopyCodeCols.has(colName)) {
-      const bpe = this.#getColumn(colName).data[0].values.BYTES_PER_ELEMENT;
-      if (bpe === 1) return "int8";
-      if (bpe === 2) return "int16";
-      return "int32";
+      // Zero-copy codes keep the Arrow dictionary index type (signed or unsigned)
+      const { bitWidth, signed } = this.#getColumn(colName).type.indices;
+      return `${signed ? "int" : "uint"}${bitWidth}`;
     }
     if (numCategories <= 128) return "int8";
     if (numCategories <= 32768) return "int16";
     return "int32";
   }
 
-  #codeDtype(colName: string, numCategories: number): string {
-    if (this.#zeroCopyCodeCols.has(colName)) {
-      const bpe = this.#getColumn(colName).data[0].values.BYTES_PER_ELEMENT;
-      if (bpe === 1) return "|i1";
-      if (bpe === 2) return "<i2";
-      return "<i4";
-    }
+  #codeDtype(numCategories: number): string {
     if (numCategories <= 128) return "|i1";
     if (numCategories <= 32768) return "<i2";
     return "<i4";
   }
 
   #numericCodecs(dataType: string): unknown[] {
-    if (dataType === "int8") return [{ name: "bytes" }];
+    if (dataType === "int8" || dataType === "uint8") return [{ name: "bytes" }];
     return [{ name: "bytes", configuration: { endian: "little" } }];
   }
 
@@ -531,7 +535,7 @@ export class ArrowAsAnnDataFrameStore implements AsyncReadable {
             }
             const codes = this.#readCodesBatch(colName, chunkIndex);
             const categories = this.#getCategories(colName);
-            const codeDtype = this.#codeDtype(colName, categories.length);
+            const codeDtype = this.#codeDtype(categories.length);
             return this.#encodeTypedArray(codes, codeDtype);
           }
         }

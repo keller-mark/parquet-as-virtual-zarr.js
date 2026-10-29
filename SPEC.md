@@ -92,7 +92,7 @@ So chunk `k` of the array at path `P` has the key `/P/c/k`, and it holds the row
 
 **Regularity precondition.** This mapping is only correct if every row chunk except the last has
 exactly `C` rows, and the last has between 1 and `C` rows. If the source does not meet this
-precondition, an implementation SHOULD raise an error when it opens the source. It MUST NOT silently
+precondition, an implementation MUST raise an error when it opens the source. It MUST NOT silently
 serve data with misaligned rows. An implementation MAY instead offer a re-chunking fallback that
 gives up the one-to-one mapping.
 
@@ -185,12 +185,14 @@ kinds.
 | Kind | Node at `/{col}` | Members |
 |---|---|---|
 | **numeric** | array (§2.4.3) | — |
+| **bool** (§3 only) | array (§2.4.4a) | — |
 | **string** | array (§2.4.4) | — |
 | **categorical** | group (§2.4.5) | `codes` (§2.4.6), `categories` (§2.4.7) |
 | **nullable** (§3 only) | group (§2.4.8) | `values`, `mask` (§2.4.9) |
 
 The index column is always exposed as a **string** array, whatever its source type. Its chunk values
-MUST be the canonical decimal string form of the source values (see the notes in §3.9 and §4.6).
+MUST be the canonical decimal string form of the source values (for example `10` becomes `"10"`),
+matching what AnnData writes for a non-string index.
 
 #### 2.4.3 Numeric column array — `/{col}/zarr.json`
 
@@ -219,6 +221,16 @@ This document has the same structure as §2.4.3, with these differences:
 - `"codecs": [{"name": "vlen-utf8"}]`
 - `"attributes": {"encoding-type": "string-array", "encoding-version": "0.2.0"}`
 
+#### 2.4.4a Bool column array — `/{col}/zarr.json`
+
+This document has the same structure as §2.4.3, with these differences:
+
+- `"data_type": "bool"`
+- `"fill_value": false`
+
+Its `attributes` stay `{"encoding-type": "array", "encoding-version": "0.2.0"}`. Chunks hold one byte
+per row (§2.2).
+
 #### 2.4.5 Categorical group — `/{col}/zarr.json`
 
 ```json
@@ -236,7 +248,8 @@ This document has the same structure as §2.4.3, with these differences:
 - `data_type` comes from §2.3, or from a store-specific override;
 - `attributes` is `{}`.
 
-Chunk `k` holds the codes for row chunk `k`.
+Chunk `k` holds the codes for row chunk `k`. Rows whose value is missing MUST have code `-1`, the
+AnnData missing-category sentinel. Missing values are never categories.
 
 #### 2.4.7 Categories array — `/{col}/categories/zarr.json`
 
@@ -250,6 +263,15 @@ It has exactly one chunk, with the key `/{col}/categories/c/0`.
 
 #### 2.4.8 Nullable group — `/{col}/zarr.json`
 
+This follows the [AnnData nullable array specifications](https://github.com/scverse/anndata/blob/main/docs/fileformat-prose.md#nullable-integers-booleans-and-strings)
+(v0.1.0). There are three encodings:
+
+| `encoding-type` | `values` member |
+|---|---|
+| `nullable-integer` | integer array (§2.4.3) |
+| `nullable-boolean` | bool array (§2.4.4a) |
+| `nullable-string-array` | string array (§2.4.4) |
+
 ```json
 {
   "zarr_format": 3,
@@ -258,23 +280,25 @@ It has exactly one chunk, with the key `/{col}/categories/c/0`.
 }
 ```
 
+For `nullable-string-array`, the attributes also include `"na-value": "NA"`. Parquet and Arrow nulls
+compare as missing, which is AnnData's `"NA"` missing-value semantics, not `"NaN"`.
+
+AnnData defines **no nullable float encoding**, and anndata itself cannot write one. Float columns with
+missing values are therefore plain float arrays (§2.4.3) with `NaN` at the missing rows, which is how
+AnnData stores them.
+
 #### 2.4.9 Nullable members
 
-- `/{col}/values/zarr.json`:
-  - a numeric array (§2.4.3) for `nullable-integer`;
-  - a string array (§2.4.4) for `nullable-string-array`;
-  - a bool array (below) for `nullable-boolean`.
-- `/{col}/mask/zarr.json`: a bool array with these properties:
-  - `"data_type": "bool"`
-  - `"fill_value": false`
-  - `"codecs": [{"name": "bytes", "configuration": {"endian": "little"}}]`
-  - `"attributes": {}`
-  - `shape` and `chunk_grid` as in §2.1
+- `/{col}/values/zarr.json`: the `values` array from the table in §2.4.8, including its
+  `encoding-type` attributes (`array`, or `string-array` for strings).
+- `/{col}/mask/zarr.json`: a bool array (§2.4.4a), so its attributes are
+  `{"encoding-type": "array", "encoding-version": "0.2.0"}`.
 
   Mask byte `1` (true) means the row is **missing**. `0` means the row is present.
-- In `values`, the slot of a missing row holds a placeholder:
-  - `NaN` for floats;
-  - `0` for integers and booleans;
+- `values` and `mask` have the same `shape` and `chunk_grid` (§2.1).
+- In `values`, the slot of a missing row holds a placeholder, matching what anndata writes:
+  - `0` for integers;
+  - `false` (byte `0`) for booleans;
   - `""` for strings.
 
 ### 2.5 Consolidated metadata (optional helper)
@@ -378,7 +402,7 @@ first leaf column.
 | `INT64` | `int64` |
 | `FLOAT` | `float32` |
 | `DOUBLE` | `float64` |
-| `BOOLEAN` | — (string kind if required, see below) |
+| `BOOLEAN` | `bool` |
 | anything else (`BYTE_ARRAY`, `FIXED_LEN_BYTE_ARRAY`, `INT96`) | — (string) |
 
 Logical/converted types (such as `INT_8`, `DATE`, `TIMESTAMP_*`, `DECIMAL`) are ignored. The physical
@@ -388,12 +412,19 @@ type alone decides the mapping.
 
 1. In the categorical set → **categorical**.
 2. Is the index column → **string**.
-3. `repetition_type == OPTIONAL` → **nullable**. The encoding-type depends on the physical type:
+3. `repetition_type == OPTIONAL` and the physical type is not `FLOAT` or `DOUBLE` → **nullable**.
+   The encoding-type depends on the physical type:
    - `BOOLEAN` → `nullable-boolean`;
-   - a non-numeric type → `nullable-string-array`;
-   - any other type → `nullable-integer`. This includes `FLOAT` and `DOUBLE`; see §3.9.
-4. Numeric physical type → **numeric**.
-5. Anything else → **string**.
+   - `INT32` / `INT64` → `nullable-integer`;
+   - any other type → `nullable-string-array`.
+4. Numeric physical type → **numeric**. This includes `OPTIONAL FLOAT` / `DOUBLE` columns, whose
+   missing values become `NaN`. AnnData has no nullable float encoding (§2.4.8) and stores float
+   columns with missing values the same way.
+5. `BOOLEAN` (necessarily `REQUIRED` here) → **bool**.
+6. Anything else → **string**.
+
+**Regularity.** After building the row-group map (§3.3), the store MUST check the §2.1 precondition
+and fail to open if it does not hold.
 
 ### 3.5 Key routing
 
@@ -401,10 +432,11 @@ type alone decides the mapping.
 |---|---|---|
 | `/zarr.json` | — | Root group (§2.4.1) |
 | `/{col}/zarr.json` | numeric | §2.4.3 (codecs per §3.6) |
+| `/{col}/zarr.json` | bool | §2.4.4a |
 | `/{col}/zarr.json` | string | §2.4.4 |
 | `/{col}/zarr.json` | categorical | §2.4.5 |
 | `/{col}/zarr.json` | nullable | §2.4.8 |
-| `/{col}/c/{g}` | numeric or string, `0 ≤ g < R` | §3.7.1 |
+| `/{col}/c/{g}` | numeric, bool or string, `0 ≤ g < R` | §3.7.1 |
 | `/{col}/values/zarr.json` | nullable | §2.4.9 |
 | `/{col}/values/c/{g}` | nullable, `0 ≤ g < R` | §3.7.2 |
 | `/{col}/mask/zarr.json` | nullable | §2.4.9 |
@@ -415,16 +447,28 @@ type alone decides the mapping.
 | `/{col}/categories/c/0` | categorical | §3.7.4 |
 | anything else | — | `ABSENT` |
 
-Only `/zarr.json` and keys for nullable or numeric columns can be served from the footer alone. Keys
+Only `/zarr.json` and the `zarr.json` keys of non-categorical columns can be served from the footer
+alone. Keys
 under `codes` and `categories` need the category set (§3.7.4).
 
 ### 3.6 Zero-copy compressed pass-through
 
-A **numeric** column is **zero-copy eligible** if all of these hold:
+A **numeric** column is **zero-copy eligible** if all of these hold in **every** row group of
+**every** part:
 
 - its physical type is `INT32`, `INT64`, `FLOAT` or `DOUBLE`;
 - its `repetition_type` is `REQUIRED`;
-- its column-chunk `encodings` contain neither `RLE_DICTIONARY` nor `PLAIN_DICTIONARY`.
+- its column-chunk `encodings` contain neither `RLE_DICTIONARY` nor `PLAIN_DICTIONARY`;
+- its column-chunk `codec` is the same everywhere;
+- if that codec is not `UNCOMPRESSED`, the column chunk's `encoding_stats` are present, list no
+  `DICTIONARY_PAGE`, and count exactly one data page (`DATA_PAGE` plus `DATA_PAGE_V2`).
+
+The last condition exists because separately compressed page payloads cannot, in general, be
+concatenated into one valid compressed stream. Without `encoding_stats` the page count is unknown
+from the footer, so the column is not eligible. An implementation MAY instead learn page counts from
+the Parquet `OffsetIndex`, at the cost of extra reads.
+
+All of these conditions are checked against footer metadata only, at no I/O cost.
 
 For an eligible column, the Parquet column-chunk `codec` decides the virtual codec pipeline:
 
@@ -442,10 +486,7 @@ The compression codecs carry no `configuration`. If the host Zarr library requir
 some `gzip` or `zstd` implementations require `level`), the implementation MAY add a dummy value,
 because decoding ignores it.
 
-Eligibility and the codec MUST be the same for every row group of every part. An implementation MUST
-check this against all column-chunk metadata in the footers, which costs no I/O. If any row group
-differs, the column MUST use the decode path for all row groups. (The reference implementation only
-checks part 0, row group 0; see §3.9.)
+A column that is not eligible uses the decode path (§3.7.1) and `[bytes]` for all row groups.
 
 #### 3.6.1 Codec definitions
 
@@ -474,21 +515,20 @@ Fetch the range with **one** `getRange(part_key, {offset: start, length})`. The 
 sequence of Thrift-compact `PageHeader`s, each followed by `compressed_page_size` bytes of page
 payload. An implementation MUST NOT read any other part of the file to serve a chunk.
 
-#### 3.7.1 Numeric or string column chunk — `/{col}/c/{g}`
+#### 3.7.1 Numeric, bool or string column chunk — `/{col}/c/{g}`
 
 **Zero-copy path.** This path applies to zero-copy eligible columns (§3.6).
 
 1. Walk the page headers. If the chunk has exactly one data page (`DATA_PAGE` or `DATA_PAGE_V2`),
    return that page's payload bytes **unchanged** (still compressed with the Parquet codec).
 2. For `lz4_raw`, put `u32le(uncompressed_page_size)` from the page header in front of the payload.
-3. If the chunk has more than one data page, take the decode path. The output MUST still match the
-   codec pipeline that the metadata declares:
-   - if the declared pipeline is `[bytes]`, return the decoded little-endian values;
-   - if it includes a compression codec, the store MUST compress the decoded values with that codec
-     before returning them.
-
-   An implementation MAY instead check page counts up front (for example from the Parquet
-   `OffsetIndex`) and exclude columns with multi-page chunks from eligibility.
+3. Otherwise, the output MUST still match the codec pipeline that the metadata declares. This covers
+   a chunk with more than one data page, and a `DATA_PAGE_V2` with `is_compressed = false` under a
+   compressed codec.
+   - If the declared pipeline is `[bytes]` (`UNCOMPRESSED`), take the decode path.
+   - If it includes a compression codec, the footer's `encoding_stats` were wrong. The store MUST
+     either compress the decoded values with the declared codec or fail the request with an error.
+     It MUST NOT return uncompressed bytes.
 
 **Decode path.** This path applies to all other columns.
 
@@ -504,7 +544,10 @@ payload. An implementation MUST NOT read any other part of the file to serve a c
    §2.4.9.
 2. Encode the result:
    - numeric: packed little-endian values of the column's `data_type`, with codecs `[bytes]`;
-   - string: vlen-utf8 (§2.2), decoding `BYTE_ARRAY` values as UTF-8.
+   - bool: one byte per row (§2.2);
+   - string: vlen-utf8 (§2.2), decoding `BYTE_ARRAY` values as UTF-8. Non-string values (for
+     example a numeric index column) are converted to their decimal string form, and missing values
+     to `""`.
 
 #### 3.7.2 Nullable values — `/{col}/values/c/{g}`
 
@@ -542,12 +585,12 @@ union of the dictionaries, and sorts it as in §2.3. The result MUST be the same
 
 **`/{col}/codes/c/{g}`.**
 
-1. Decode row group `g` of `col` to strings.
-2. Map each string to its position in the categories.
+1. Decode row group `g` of `col`. For `OPTIONAL` columns, use the definition levels to find the rows
+   that are missing.
+2. Map each value to its position in the categories, and each missing row to `-1`.
 3. Pack the codes little-endian at the §2.3 width.
 
-Rows that are null in the source SHOULD be given code `-1`, the AnnData missing-category sentinel.
-(The reference implementation gives them code `0`; see §3.9.)
+Missing rows are excluded when building the categories.
 
 ### 3.8 I/O guarantees
 
@@ -559,28 +602,6 @@ A conforming implementation:
   apart from the full-column scan allowed when building categories (§3.7.4);
 - never issues a `get` (an unbounded read) against the source store;
 - caches parsed footers, so each footer is read at most once for each store instance.
-
-### 3.9 Reference-implementation notes
-
-The reference implementation differs from the spec above in these known ways. New implementations
-SHOULD follow the spec instead:
-
-- **Numeric index columns.** The metadata declares the index as a string array (§2.4.4). For
-  `INT32`/`INT64`/`FLOAT`/`DOUBLE` index columns, however, the reference returns packed numeric chunk
-  bytes, so the bytes do not match the metadata. The values SHOULD be turned into decimal strings and
-  encoded as vlen-utf8.
-- **Eligibility.** Eligibility is checked only against part 0, row group 0.
-- **Multi-page chunks.** A zero-copy column chunk with several data pages falls back to returning
-  uncompressed decoded bytes, while the metadata still declares a compression codec. §3.7.1 requires
-  the output to match the declared pipeline.
-- **Null categorical values.** Rows that are null in categorical columns get code `0`, not `-1`.
-- **Nullable floats.** `OPTIONAL FLOAT`/`DOUBLE` columns are exposed as `nullable-integer`, with
-  `NaN` in the null slots. An implementation MAY instead expose them as plain float arrays with `NaN`
-  for missing values, which is how AnnData itself stores nullable floats. If it does, it MUST
-  document the choice.
-- **Required booleans.** `REQUIRED BOOLEAN` columns are exposed as string arrays (`"true"` /
-  `"false"`).
-- **No regularity check.** The precondition in §2.1 is not checked.
 
 ---
 
@@ -626,9 +647,8 @@ metadata if that is present. Otherwise it is the first field.
 | `FloatingPoint(DOUBLE)` | `float64` |
 | anything else | string |
 
-`HALF` maps to `float32` only nominally. Implementations SHOULD either widen half-precision values to
-`float32` when serving chunks or reject the column. Serving the raw 2-byte buffer under a `float32`
-declaration is incorrect.
+Half-precision (`HALF`) values MUST be widened to `float32` when chunks are served. Serving the raw
+2-byte buffer under a `float32` declaration is incorrect.
 
 **Kind.** Each column gets the first kind that applies: **categorical**, then **string** (for the index
 column), then **numeric** (for a numeric type), then **string**. This store never produces the
@@ -642,7 +662,7 @@ This store uses the routing table of §3.5, minus the nullable rows. `g` is a ba
 
 - **Numeric `/{col}/c/{g}`.** Return the first `len(batch_g) × element_size` bytes of batch `g`'s
   values buffer, starting at its byte offset. This is a zero-copy view; the Arrow buffer is already
-  little-endian. Validity bitmaps are ignored, so the bytes in null slots are whatever the buffer
+  little-endian. `HALF` columns are the exception: they are widened to `float32` (§4.3). Validity bitmaps are ignored, so the bytes in null slots are whatever the buffer
   holds.
 - **String `/{col}/c/{g}`.** Turn each element of batch `g` into a string with the host language's
   canonical conversion (for example decimal for numbers and `true`/`false` for booleans). Use `""` for
@@ -654,34 +674,25 @@ This store uses the routing table of §3.5, minus the nullable rows. `g` is a ba
   - its Arrow type is `Dictionary`;
   - every batch refers to the **same** dictionary;
   - that dictionary is non-empty;
-  - that dictionary is **strictly ascending** in the §2.3 order, which also means it has no duplicates.
+  - that dictionary is **strictly ascending** in the §2.3 order, which also means it has no duplicates;
+  - no batch has nulls. The index buffer holds arbitrary values at null rows, but those rows need
+    code `-1`.
 
   *Eligible columns:*
   - The categories are the dictionary values in their stored order.
-  - `codes` `data_type` is set by the dictionary index width: 1 byte → `int8`, 2 → `int16`,
-    4 → `int32`. This overrides §2.3.
+  - `codes` `data_type` is the Arrow dictionary index type: `int8`/`int16`/`int32`/`int64`, or
+    `uint8`/`uint16`/`uint32`/`uint64` for unsigned indices. This overrides §2.3.
   - `/{col}/codes/c/{g}` is a zero-copy view of batch `g`'s index buffer.
 
   *Ineligible columns:*
-  - For a `Dictionary` type, the categories are the distinct values of the dictionary of batch 0,
-    sorted as in §2.3. For any other type, they are the distinct string values across all batches.
-  - Codes are made by mapping each row's value to its position in the categories. Use the batch's own
-    dictionary when there is one.
+  - For a `Dictionary` type, the categories are the distinct non-null values of the union of all
+    batch dictionaries (batches can carry replacement or delta dictionaries), sorted as in §2.3. For
+    any other type, they are the distinct non-null values across all batches, converted to strings
+    and sorted the same way.
+  - Codes are made by mapping each row's value to its position in the categories, using the batch's
+    own dictionary when there is one. Missing rows get `-1`.
   - Codes are packed at the §2.3 width.
-
-  If dictionaries can differ between batches (delta or replacement dictionaries), the categories MUST
-  be the union of all batch dictionaries. (The reference only uses batch 0's dictionary when the
-  column is not eligible.)
 - **`/{col}/categories/c/0`.** The categories, encoded as vlen-utf8.
-
-Row values that are missing SHOULD get code `-1`. (The reference gives them `0`.)
-
-### 4.6 Reference-implementation notes
-
-- Unsigned 8/16/64-bit codes and the general Arrow index type: the zero-copy codes path assumes the
-  dictionary index type is signed. If the index type is unsigned, implementations MUST use the
-  matching `uint*` data type, or remap.
-- Numeric index columns are stringified (§2.4.2), so this store does match the spec there.
 
 ---
 

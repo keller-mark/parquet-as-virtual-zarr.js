@@ -119,15 +119,16 @@ describe("plain array column (index)", () => {
   });
 });
 
-// n_counts and n_genes are OPTIONAL in obs.parquet, so they are exposed as
-// 1d-interpreted nullable groups (values + mask), as in ParquetAsAnnDataFrameStore.
+// n_counts and n_genes are OPTIONAL in obs.parquet. As in ParquetAsAnnDataFrameStore,
+// the float column n_counts is a plain array (NaN for nulls), while the integer column
+// n_genes is a 1d-interpreted nullable group (values + mask).
 describe("nullable numeric columns", () => {
-  for (const name of ["n_counts", "n_genes"]) {
+  for (const [name, path] of [["n_counts", ""], ["n_genes", "/values"]]) {
     test(`${name} values match zarr and have length df:shape[0]`, async () => {
       const grp = await open(root(store), { kind: "group" });
       const [numRows] = grp.attrs["df:shape"] as number[];
       const member = await memberFor(store, name);
-      const arr = await open(root(store).resolve(`${member}/values`), { kind: "array" });
+      const arr = await open(root(store).resolve(`${member}${path}`), { kind: "array" });
       const expected = await open(root(zarrStore).resolve(name), { kind: "array" });
       expect(arr.dtype).toBe(expected.dtype);
       expect(arr.shape).toEqual([numRows]);
@@ -186,7 +187,7 @@ describe("nullable columns (athletes.parquet)", () => {
   test("nullable column is a group with values and mask of length df:shape[0]", async () => {
     const grp = await open(root(athletes), { kind: "group" });
     const [numRows] = grp.attrs["df:shape"] as number[];
-    const member = await memberFor(athletes, "height");
+    const member = await memberFor(athletes, "weight");
     await open(root(athletes).resolve(member), { kind: "group" });
     const values = await get(await open(root(athletes).resolve(`${member}/values`), { kind: "array" }));
     const mask = await get(await open(root(athletes).resolve(`${member}/mask`), { kind: "array" }));

@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  anndata.js@0.0.3:
+    hash: s7xpjurlmbiptzns2ep24xwzwi
+    path: patches/anndata.js@0.0.3.patch
+
 importers:
 
   .:
@@ -36,6 +41,9 @@ importers:
       '@types/node':
         specifier: ^25.5.0
         version: 25.5.0
+      anndata.js:
+        specifier: 0.0.3
+        version: 0.0.3(patch_hash=s7xpjurlmbiptzns2ep24xwzwi)
       typescript:
         specifier: ^5.4.0
         version: 5.9.3
@@ -363,6 +371,9 @@ packages:
   '@zarrita/storage@0.2.0':
     resolution: {integrity: sha512-855ZXqtnds7spnT8vNvD+MXa3QExP1m2GqShe8yt7uZXHnQLgJHgkpVwFjE1B0KDDRO0ki09hmk6OboTaIfPsQ==}
 
+  anndata.js@0.0.3:
+    resolution: {integrity: sha512-6hO/eZR20LQjdGAUGdJA1t3iDI7y7Upsmlnwq90gkIo7vsykRtBDt4HV0wx2iLTeWaHGsUpq4Dp3xLiBlLI6ww==}
+
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
     engines: {node: '>=12'}
@@ -444,6 +455,10 @@ packages:
     resolution: {integrity: sha512-N8SpfPUnUp1bK+PMYW8qSWdl9U+wwNWI4QKxOYDy9JAro3WMX7p2OeVRF9v+347pnakNevPmiHhNmZ2HbFA76w==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
+
+  numcodecs@0.2.2:
+    resolution: {integrity: sha512-Y5K8mv80yb4MgVpcElBkUeMZqeE4TrovxRit/dTZvoRl6YkB6WEjY+fiUjGCblITnt3T3fmrDg8yRWu0gOLjhQ==}
+    engines: {node: '>=12'}
 
   numcodecs@0.3.2:
     resolution: {integrity: sha512-6YSPnmZgg0P87jnNhi3s+FVLOcIn3y+1CTIgUulA3IdASzK9fJM87sUFkpyA+be9GibGRaST2wCgkD+6U+fWKw==}
@@ -805,6 +820,11 @@ snapshots:
       reference-spec-reader: 0.2.0
       unzipit: 2.0.0
 
+  anndata.js@0.0.3(patch_hash=s7xpjurlmbiptzns2ep24xwzwi):
+    dependencies:
+      numcodecs: 0.2.2
+      zarrita: 0.7.5
+
   assertion-error@2.0.1: {}
 
   cac@6.7.14: {}
@@ -887,6 +907,8 @@ snapshots:
   ms@2.1.3: {}
 
   nanoid@3.3.11: {}
+
+  numcodecs@0.2.2: {}
 
   numcodecs@0.3.2:
     dependencies:
