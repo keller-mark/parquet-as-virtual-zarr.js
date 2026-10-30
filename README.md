@@ -38,6 +38,14 @@ Run unit tests:
 pnpm run test
 ```
 
+Preview the demo site:
+
+```sh
+pnpm build:demo
+pnpm exec vite preview --config vite.config.demo.js
+# Open http://localhost:5173/parquet-as-virtual-zarr.js/
+```
+
 Publish:
 
 ```sh
