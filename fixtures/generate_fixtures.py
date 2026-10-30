@@ -72,9 +72,12 @@ def make_obs_plain(n_obs: int, seed: int = 42) -> pd.DataFrame:
     )
 
 
-def write_parquet_plain(obs: pd.DataFrame, path: str, row_group_size: int, compression: str = "SNAPPY") -> None:
+def write_parquet_plain(
+    obs: pd.DataFrame, path: str, row_group_size: int, compression: str = "SNAPPY", **write_kwargs
+) -> None:
     """Write a parquet file with PLAIN encoding (no dictionary) and explicit
-    non-nullable Arrow schema for numeric columns."""
+    non-nullable Arrow schema for numeric columns. Extra keyword arguments are
+    passed to pyarrow.parquet.write_table."""
     # Build an Arrow schema where numeric fields are non-nullable (required)
     arrow_fields = []
     pandas_meta = pa.Table.from_pandas(obs).schema.pandas_metadata
@@ -107,6 +110,7 @@ def write_parquet_plain(obs: pd.DataFrame, path: str, row_group_size: int, compr
         row_group_size=row_group_size,
         use_dictionary=False,
         compression=compression,
+        **write_kwargs,
     )
     meta = pq.read_metadata(path)
     print(f"Wrote Parquet (plain, {compression}): {path}")
@@ -129,12 +133,79 @@ def write_parquet_multipart(obs: pd.DataFrame, path: str, row_group_size: int) -
     print(f"  parts={part_index}  rows_per_part={row_group_size}")
 
 
-def write_zarr(obs: pd.DataFrame, path: str, row_group_size: int) -> None:
+def make_obs_edge(n_obs: int, seed: int = 42) -> pd.DataFrame:
+    """Create a dataframe exercising edge cases of the Parquet → AnnData mapping:
+    a numeric (int64) index, a non-nullable bool column, a categorical column with
+    missing values, a float column with missing values, and pandas nullable
+    integer, boolean, and string columns (AnnData nullable-* encodings)."""
+    rng = np.random.default_rng(seed)
+    cell_type = pd.Categorical(
+        np.array(rng.choice(["T cell", "B cell", "NK cell"], n_obs), dtype=object),
+        categories=np.array(["B cell", "NK cell", "T cell"], dtype=object),
+    )
+    cell_type[rng.random(n_obs) < 0.2] = np.nan
+    n_counts = rng.uniform(500.0, 5000.0, n_obs).astype(np.float32)
+    n_counts[::7] = np.nan
+    missing = rng.random(n_obs) < 0.25
+    n_genes = pd.array(rng.integers(200, 2000, n_obs), dtype="Int32")
+    n_genes[missing] = pd.NA
+    is_filtered = pd.array(rng.random(n_obs) < 0.5, dtype="boolean")
+    is_filtered[rng.random(n_obs) < 0.25] = pd.NA
+    note = pd.array([f"note_{i}" for i in range(n_obs)], dtype=pd.StringDtype("python", na_value=pd.NA))
+    note[rng.random(n_obs) < 0.25] = pd.NA
+    return pd.DataFrame(
+        {
+            "cell_type": cell_type,
+            "n_counts": n_counts,
+            "is_doublet": rng.random(n_obs) < 0.3,
+            "n_genes": n_genes,
+            "is_filtered": is_filtered,
+            "note": note,
+        },
+        index=pd.Index(np.arange(n_obs, dtype=np.int64) * 10, name="cell_id"),
+    )
+
+
+def write_parquet_edge(obs: pd.DataFrame, path: str, row_group_size: int) -> None:
+    """Write the edge-case dataframe with the bool column marked non-nullable (REQUIRED)."""
+    table = pa.Table.from_pandas(obs)
+    schema = table.schema
+    i = schema.get_field_index("is_doublet")
+    table = table.cast(schema.set(i, schema.field(i).with_nullable(False)))
+    pq.write_table(table, path, row_group_size=row_group_size)
+    print(f"Wrote Parquet (edge cases): {path}")
+
+
+def write_parquet_irregular(obs: pd.DataFrame, path: str, sizes: list[int]) -> None:
+    """Write a parquet file whose row groups have the given (irregular) sizes."""
+    table = pa.Table.from_pandas(obs)
+    with pq.ParquetWriter(path, table.schema) as writer:
+        offset = 0
+        for size in sizes:
+            writer.write_table(table.slice(offset, size), row_group_size=size)
+            offset += size
+    print(f"Wrote Parquet (row groups {sizes}): {path}")
+
+
+def write_parquet_plain_mixed_codec(obs: pd.DataFrame, path: str, row_group_size: int, codecs: list[str]) -> None:
+    """Write a multi-part PLAIN parquet directory where each part uses a different codec."""
+    if os.path.exists(path):
+        shutil.rmtree(path)
+    os.makedirs(path)
+    part_size = len(obs) // len(codecs)
+    for i, codec in enumerate(codecs):
+        part = obs.iloc[i * part_size : (i + 1) * part_size]
+        write_parquet_plain(part, os.path.join(path, f"part.{i}.parquet"), row_group_size, compression=codec)
+
+
+def write_zarr(
+    obs: pd.DataFrame, path: str, row_group_size: int, convert_strings_to_categoricals: bool = True
+) -> None:
     if os.path.exists(path):
         shutil.rmtree(path)
     ad.settings.zarr_write_format = 3
     adata = ad.AnnData(obs=obs)
-    adata.write_zarr(path, chunks=row_group_size)
+    adata.write_zarr(path, chunks=row_group_size, convert_strings_to_categoricals=convert_strings_to_categoricals)
     zarr.consolidate_metadata(path + "/obs")
     print(f"Wrote AnnData-Zarr (v3): {path}")
     print(f"  obs dataframe at: {path}/obs/")
@@ -180,6 +251,40 @@ def main() -> None:
 
     zarr_plain_path = os.path.join(args.output_dir, "adata_plain.zarr")
     write_zarr(obs_plain, zarr_plain_path, args.row_group_size)
+
+    # Small data pages: several data pages per column chunk, so compressed
+    # page payloads cannot be passed through as a single zarr chunk.
+    write_parquet_plain(
+        obs_plain,
+        os.path.join(args.output_dir, "obs_plain_multipage.parquet"),
+        args.row_group_size,
+        compression="SNAPPY",
+        data_page_size=64,
+        write_batch_size=8,
+    )
+
+    # Parts with different codecs: zero-copy must be decided across all parts.
+    write_parquet_plain_mixed_codec(
+        obs_plain,
+        os.path.join(args.output_dir, "obs_plain_mixed_codec"),
+        args.row_group_size,
+        codecs=["SNAPPY", "GZIP"],
+    )
+
+    # Edge cases: numeric index, REQUIRED bool, categorical and float with missing values
+    obs_edge = make_obs_edge(args.n_obs, seed=args.seed)
+    write_parquet_edge(obs_edge, os.path.join(args.output_dir, "obs_edge.parquet"), args.row_group_size)
+    # Keep nullable strings as nullable-string-array rather than converting to categorical
+    with ad.settings.override(allow_write_nullable_strings=True):
+        write_zarr(
+            obs_edge,
+            os.path.join(args.output_dir, "adata_edge.zarr"),
+            args.row_group_size,
+            convert_strings_to_categoricals=False,
+        )
+
+    # Irregular row groups (first smaller than the rest) cannot map to a regular chunk grid
+    write_parquet_irregular(obs, os.path.join(args.output_dir, "obs_irregular.parquet"), [10, 30, 60])
 
 
 if __name__ == "__main__":

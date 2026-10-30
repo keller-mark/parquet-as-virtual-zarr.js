@@ -42,7 +42,7 @@ const Encodings = [
 
 // ── Page header ────────────────────────────────────────────────────────
 
-interface PageHeader {
+export interface PageHeader {
   type: string;
   uncompressed_page_size: number;
   compressed_page_size: number;
@@ -325,7 +325,7 @@ function readPlainByteArray(reader: DataReader, count: number): Uint8Array[] {
   return values;
 }
 
-type DecodedArray = Int32Array | BigInt64Array | Float32Array | Float64Array | Uint8Array | Uint8Array[] | string[];
+type DecodedArray = Int32Array | BigInt64Array | Float32Array | Float64Array | Uint8Array | Uint8Array[] | (string | null)[];
 
 function readPlainBoolean(reader: DataReader, count: number): Uint8Array {
   const byteCount = Math.ceil(count / 8);
@@ -399,10 +399,11 @@ export function isZeroCopyEligible(
 
 /**
  * Extract raw page data from a column chunk for zero-copy pass-through.
- * Returns the page data bytes with page headers stripped.
+ * Returns the page data bytes with page headers stripped, along with the
+ * page header (needed for the uncompressed size and V2 compression flag).
  *
- * For SNAPPY columns: returns the compressed page data (a valid snappy stream).
- *   The zarr snappy codec will decompress it.
+ * For compressed columns: returns the compressed page data (a valid stream
+ *   for the corresponding zarr codec).
  * For UNCOMPRESSED columns: returns the raw bytes (the typed array values).
  *
  * Only works for single-data-page column chunks (no dictionary pages).
@@ -411,9 +412,9 @@ export function isZeroCopyEligible(
  */
 export function extractZeroCopyPageData(
   rawBytes: Uint8Array,
-): Uint8Array | null {
+): { data: Uint8Array; header: PageHeader } | null {
   const reader = createReader(rawBytes);
-  let dataPageBytes: Uint8Array | null = null;
+  let result: { data: Uint8Array; header: PageHeader } | null = null;
 
   while (reader.offset < rawBytes.byteLength) {
     const header = parsePageHeader(reader);
@@ -425,20 +426,21 @@ export function extractZeroCopyPageData(
     reader.offset += header.compressed_page_size;
 
     if (header.type === "DATA_PAGE" || header.type === "DATA_PAGE_V2") {
-      if (dataPageBytes !== null) {
+      if (result !== null) {
         // Multiple data pages — cannot do zero-copy
         return null;
       }
-      dataPageBytes = pageBytes;
+      result = { data: pageBytes, header };
     }
   }
 
-  return dataPageBytes;
+  return result;
 }
 
 /**
  * Expand a compact (non-null-only) array back to full length using definition levels.
- * Null positions receive a type-appropriate fill value (NaN for floats, 0 for ints).
+ * Null positions receive a type-appropriate placeholder: NaN for floats, 0 for
+ * ints and booleans, null for strings.
  */
 function expandNullable(
   compact: DecodedArray,
@@ -459,7 +461,7 @@ function expandNullable(
   } else if (parquetType === "BOOLEAN") {
     result = new Uint8Array(total);
   } else {
-    result = new Array<Uint8Array>(total).fill(new Uint8Array(0));
+    result = new Array<string | null>(total).fill(null);
   }
   let j = 0;
   for (let i = 0; i < total; i++) {
@@ -472,9 +474,63 @@ function expandNullable(
 }
 
 /**
+ * Decode the values section of one data page (after any definition levels)
+ * and expand it to one value per row when definition levels are given.
+ */
+function decodePageValues(
+  reader: DataReader,
+  pageEnd: number,
+  encoding: string,
+  parquetType: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  dictionary: any,
+  numValues: number,
+  defLevels: number[] | undefined,
+): DecodedArray {
+  const nonNullCount = defLevels
+    ? defLevels.reduce((acc, l) => acc + (l !== 0 ? 1 : 0), 0)
+    : numValues;
+
+  let compact: DecodedArray;
+  if (encoding === "PLAIN") {
+    compact = readPlainValues(reader, parquetType, nonNullCount);
+    if (parquetType === "BYTE_ARRAY") {
+      compact = (compact as Uint8Array[]).map((b) => decoder.decode(b));
+    }
+  } else if (encoding === "RLE_DICTIONARY" || encoding === "PLAIN_DICTIONARY") {
+    if (!dictionary) throw new Error("parquet dictionary-encoded page without a dictionary page");
+    const bw = reader.view.getUint8(reader.offset);
+    reader.offset += 1;
+    // bitWidth 0 = every value is the first dictionary entry
+    const indices = new Array<number>(nonNullCount).fill(0);
+    if (bw) readRleBitPackedHybrid(reader, bw, indices, pageEnd - reader.offset);
+    if (ArrayBuffer.isView(dictionary)) {
+      // Numeric dictionary → typed array result
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const Ctor = (dictionary as any).constructor as {
+        new (len: number): Int32Array | Float32Array | Float64Array | BigInt64Array | Uint8Array;
+      };
+      const result = new Ctor(nonNullCount);
+      for (let i = 0; i < nonNullCount; i++) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (result as any)[i] = (dictionary as any)[indices[i]];
+      }
+      compact = result;
+    } else {
+      compact = indices.map((idx) => dictionary[idx]);
+    }
+  } else {
+    throw new Error(`parquet unsupported encoding: ${encoding}`);
+  }
+
+  return defLevels ? expandNullable(compact, defLevels, parquetType) : compact;
+}
+
+/**
  * Read and decode all values from a column chunk's raw bytes.
  * Handles dictionary-encoded, PLAIN-encoded, and optional (nullable) columns.
- * Returns typed array for numerics, string array for strings.
+ * Returns typed array for numerics/booleans, string array for strings
+ * (with null at missing positions for optional columns).
  */
 export async function readColumnChunkData(
   rawBytes: Uint8Array,
@@ -485,8 +541,7 @@ export async function readColumnChunkData(
   const reader = createReader(rawBytes);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let dictionary: any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const allValues: any[] = [];
+  const allValues: DecodedArray[] = [];
 
   while (reader.offset < rawBytes.byteLength) {
     const header = parsePageHeader(reader);
@@ -520,8 +575,6 @@ export async function readColumnChunkData(
         codec,
       );
       const pageReader = createReader(page);
-      const numValues = daph.num_values;
-      const encoding = daph.encoding;
 
       // Decode definition levels for OPTIONAL columns to determine which rows are non-null.
       // Definition levels are RLE/bit-packed with bit-width 1 (0 = null, 1 = defined).
@@ -529,136 +582,41 @@ export async function readColumnChunkData(
       if (isOptional) {
         const defLength = pageReader.view.getUint32(pageReader.offset, true);
         pageReader.offset += 4;
-        defLevels = new Array<number>(numValues).fill(1);
+        defLevels = new Array<number>(daph.num_values).fill(1);
         if (defLength > 0) {
           readRleBitPackedHybrid(pageReader, 1, defLevels, defLength);
         }
       }
-      const nonNullCount = defLevels
-        ? defLevels.reduce((acc, l) => acc + (l !== 0 ? 1 : 0), 0)
-        : numValues;
-
-      if (encoding === "PLAIN") {
-        const raw = readPlainValues(pageReader, parquetType, nonNullCount);
-        const expanded = defLevels ? expandNullable(raw, defLevels, parquetType) : raw;
-        if (parquetType === "BYTE_ARRAY") {
-          allValues.push((expanded as Uint8Array[]).map((b) => decoder.decode(b)));
-        } else {
-          allValues.push(expanded);
-        }
-      } else if (
-        encoding === "RLE_DICTIONARY" ||
-        encoding === "PLAIN_DICTIONARY"
-      ) {
-        const bw = page[pageReader.offset++] || 0;
-        if (bw && dictionary) {
-          const indices = new Array<number>(nonNullCount);
-          readRleBitPackedHybrid(
-            pageReader,
-            bw,
-            indices,
-            page.byteLength - pageReader.offset,
-          );
-          // Dereference dictionary
-          if (ArrayBuffer.isView(dictionary)) {
-            // Numeric dictionary → typed array result
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const Ctor = (dictionary as any).constructor as {
-              new (len: number): Int32Array | Float32Array | Float64Array | BigInt64Array;
-            };
-            const result = new Ctor(nonNullCount);
-            for (let i = 0; i < nonNullCount; i++) {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (result as any)[i] = (dictionary as any)[indices[i]];
-            }
-            const expanded = defLevels ? expandNullable(result, defLevels, parquetType) : result;
-            allValues.push(expanded);
-          } else {
-            // String dictionary
-            const result = new Array<string>(nonNullCount);
-            for (let i = 0; i < nonNullCount; i++) {
-              result[i] = dictionary[indices[i]];
-            }
-            const expanded = defLevels ? expandNullable(result, defLevels, parquetType) : result;
-            allValues.push(expanded);
-          }
-        } else {
-          // bitWidth 0 = all values are the first dictionary entry
-          if (dictionary) {
-            const val = Array.isArray(dictionary) ? dictionary[0] : dictionary[0];
-            const result = new Array(numValues).fill(val);
-            allValues.push(result);
-          }
-        }
-      } else {
-        throw new Error(`parquet unsupported encoding: ${encoding}`);
-      }
+      allValues.push(decodePageValues(
+        pageReader, page.byteLength, daph.encoding, parquetType, dictionary, daph.num_values, defLevels,
+      ));
     } else if (header.type === "DATA_PAGE_V2") {
       const daph2 = header.data_page_header_v2!;
-      const numValues = daph2.num_values - daph2.num_nulls;
-      const encoding = daph2.encoding;
+      const repLen = daph2.repetition_levels_byte_length;
+      const defLen = daph2.definition_levels_byte_length;
 
       // For V2, repetition and definition levels are stored uncompressed
       // before the (possibly compressed) values
-      const levelsLength =
-        daph2.repetition_levels_byte_length +
-        daph2.definition_levels_byte_length;
+      let defLevels: number[] | undefined;
+      if (isOptional) {
+        defLevels = new Array<number>(daph2.num_values).fill(1);
+        if (defLen > 0) {
+          const defReader = createReader(pageBytes.subarray(repLen, repLen + defLen));
+          readRleBitPackedHybrid(defReader, 1, defLevels, defLen);
+        }
+      }
 
-      // Get the values portion (may be compressed)
+      const levelsLength = repLen + defLen;
       const valuesCompressed = pageBytes.subarray(levelsLength);
-      const uncompressedPageSize =
-        header.uncompressed_page_size - levelsLength;
-
-      let page: Uint8Array;
-      if (daph2.is_compressed !== false) {
-        page = await decompressPage(valuesCompressed, uncompressedPageSize, codec);
-      } else {
-        page = valuesCompressed;
-      }
+      const uncompressedPageSize = header.uncompressed_page_size - levelsLength;
+      const page = daph2.is_compressed !== false
+        ? await decompressPage(valuesCompressed, uncompressedPageSize, codec)
+        : valuesCompressed;
       const pageReader = createReader(page);
-
-      if (encoding === "PLAIN") {
-        const raw = readPlainValues(pageReader, parquetType, numValues);
-        if (parquetType === "BYTE_ARRAY") {
-          allValues.push((raw as Uint8Array[]).map((b) => decoder.decode(b)));
-        } else {
-          allValues.push(raw);
-        }
-      } else if (
-        encoding === "RLE_DICTIONARY" ||
-        encoding === "PLAIN_DICTIONARY"
-      ) {
-        const bw = page[pageReader.offset++] || 0;
-        if (bw && dictionary) {
-          const indices = new Array<number>(numValues);
-          readRleBitPackedHybrid(
-            pageReader,
-            bw,
-            indices,
-            uncompressedPageSize - 1,
-          );
-          if (ArrayBuffer.isView(dictionary)) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const Ctor = (dictionary as any).constructor as {
-              new (len: number): Int32Array | Float32Array | Float64Array | BigInt64Array;
-            };
-            const result = new Ctor(numValues);
-            for (let i = 0; i < numValues; i++) {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (result as any)[i] = (dictionary as any)[indices[i]];
-            }
-            allValues.push(result);
-          } else {
-            const result = new Array<string>(numValues);
-            for (let i = 0; i < numValues; i++) {
-              result[i] = dictionary[indices[i]];
-            }
-            allValues.push(result);
-          }
-        }
-      } else {
-        throw new Error(`parquet unsupported encoding: ${encoding}`);
-      }
+      allValues.push(decodePageValues(
+        pageReader, page.byteLength, daph2.encoding, parquetType, dictionary,
+        daph2.num_values - daph2.num_nulls, defLevels,
+      ));
     }
   }
 
@@ -685,7 +643,7 @@ export async function readColumnChunkData(
     return result;
   }
 
-  return allValues.flat();
+  return (allValues as unknown[][]).flat() as DecodedArray;
 }
 
 /**

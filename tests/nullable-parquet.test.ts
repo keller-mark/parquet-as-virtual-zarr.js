@@ -2,7 +2,8 @@
  * Regression tests for nullable (OPTIONAL) columns in parquet files.
  *
  * athletes.parquet contains nullable numeric columns (height: DOUBLE, weight: INT64,
- * date_of_birth: INT32). Per the AnnData on-disk format spec, each nullable column is
+ * date_of_birth: INT32). Nullable floats are plain arrays with NaN for nulls, as in
+ * AnnData. Per the AnnData on-disk format spec, each other nullable column is
  * exposed as a Zarr group with `encoding-type: "nullable-integer"` (or
  * `"nullable-string-array"` for strings) containing two arrays:
  *   - values: the data array (NaN / 0 at null positions)
@@ -34,59 +35,62 @@ beforeAll(async () => {
 });
 
 // ── nullable float64 column (height) ────────────────────────────────────────
+// AnnData stores float columns with missing values as plain float arrays with NaN,
+// so OPTIONAL FLOAT/DOUBLE columns are not exposed as nullable groups.
 
-describe("nullable float64 column (height) — group structure", () => {
+describe("nullable float64 column (height) — plain array", () => {
+  test("column node is a float64 array with encoding-type array", async () => {
+    const arr = await open(root(store).resolve("height"), { kind: "array" });
+    expect(arr.dtype).toBe("float64");
+    expect(arr.attrs["encoding-type"]).toBe("array");
+  });
+
+  test("values are NaN exactly at parquet null positions", async () => {
+    const arr = await open(root(store).resolve("height"), { kind: "array" });
+    const values = Array.from((await get(arr)).data as Float64Array);
+    const rows = (await parquetReadObjects({
+      file: asyncBuf,
+      metadata: parquetMeta,
+      columns: ["height"],
+    })) as Record<string, number | null>[];
+    expect(values.length).toBe(rows.length);
+    expect(rows.some((r) => r.height === null)).toBe(true);
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].height === null) expect(values[i]).toBeNaN();
+      else expect(values[i]).toBe(rows[i].height);
+    }
+  });
+});
+
+// ── nullable int64 column (weight) ──────────────────────────────────────────
+
+describe("nullable int64 column (weight) — group structure", () => {
   test("column node is a group with encoding-type nullable-integer", async () => {
-    const grp = await open(root(store).resolve("height"), { kind: "group" });
+    const grp = await open(root(store).resolve("weight"), { kind: "group" });
     expect(grp.attrs["encoding-type"]).toBe("nullable-integer");
     expect(grp.attrs["encoding-version"]).toBe("0.1.0");
   });
 
-  test("values sub-array is readable and has correct length", async () => {
-    const arr = await open(root(store).resolve("height/values"), { kind: "array" });
-    const chunk = await get(arr);
-    const rows = (await parquetReadObjects({
-      file: asyncBuf,
-      metadata: parquetMeta,
-      columns: ["height"],
-    })) as Record<string, number | null>[];
-    expect((chunk.data as Float64Array).length).toBe(rows.length);
-  });
-
-  test("mask sub-array is readable, same length, and contains actual nulls", async () => {
-    const arr = await open(root(store).resolve("height/mask"), { kind: "array" });
-    const chunk = await get(arr);
-    const mask = Array.from(chunk.data as Iterable<number>);
-
-    const rows = (await parquetReadObjects({
-      file: asyncBuf,
-      metadata: parquetMeta,
-      columns: ["height"],
-    })) as Record<string, number | null>[];
-
-    expect(mask.length).toBe(rows.length);
-    // Must have at least one null to verify the mask is non-trivially correct
-    expect(mask.some((v) => Boolean(v))).toBe(true);
-  });
-
-  test("mask matches parquet null positions for height", async () => {
-    const valuesArr = await open(root(store).resolve("height/values"), { kind: "array" });
-    const maskArr = await open(root(store).resolve("height/mask"), { kind: "array" });
-    const values = Array.from((await get(valuesArr)).data as Iterable<number>);
+  test("mask matches parquet null positions and values match elsewhere", async () => {
+    const valuesArr = await open(root(store).resolve("weight/values"), { kind: "array" });
+    const maskArr = await open(root(store).resolve("weight/mask"), { kind: "array" });
+    const values = Array.from((await get(valuesArr)).data as BigInt64Array);
     const mask = Array.from((await get(maskArr)).data as Iterable<number>);
 
     const rows = (await parquetReadObjects({
       file: asyncBuf,
       metadata: parquetMeta,
-      columns: ["height"],
-    })) as Record<string, number | null>[];
+      columns: ["weight"],
+    })) as Record<string, bigint | null>[];
 
+    expect(mask.length).toBe(rows.length);
+    expect(rows.some((r) => r.weight === null)).toBe(true);
     for (let i = 0; i < rows.length; i++) {
-      if (rows[i].height === null) {
+      if (rows[i].weight === null) {
         expect(mask[i]).toBeTruthy();
       } else {
         expect(mask[i]).toBeFalsy();
-        expect(values[i]).toBe(rows[i].height);
+        expect(values[i]).toBe(BigInt(rows[i].weight!));
       }
     }
   });
