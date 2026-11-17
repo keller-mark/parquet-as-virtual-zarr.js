@@ -175,6 +175,15 @@ for (const { name, fixture, zarrCodec } of COMPRESSED_CODECS) {
       expect(codecs[1].name).toBe(zarrCodec);
     });
 
+    test(`n_counts and n_genes decode via zarrita ${zarrCodec} codec to match reference`, async () => {
+      for (const colName of ["n_counts", "n_genes"]) {
+        const reference = await readReferenceColumn(colName);
+        const arr = await open(root(store).resolve(colName), { kind: "array" });
+        const { data } = await get(arr);
+        expect(Array.from(data as Float32Array | Int32Array)).toEqual(Array.from(reference));
+      }
+    });
+
     test("obs_id (string) does NOT include compression codec", async () => {
       const arr = await open(root(store).resolve("obs_id"), { kind: "array" });
       expect(arr.dtype).toBe("string");
