@@ -26,6 +26,22 @@ console.log(arr.attrs);
 const arrData = await get(arr);
 ```
 
+### Bundled ESM variant
+
+A single-file ESM bundle that includes the dependencies (hyparquet, flechette, numcodecs, etc.) is also available.
+`zarrita` is kept external (the store registers custom codecs in zarrita's codec registry, so it must share the same zarrita instance as your code).
+
+```ts
+import { ParquetAsAnnDataFrameStore } from "parquet-as-virtual-zarr/bundled";
+```
+
+The `bundled` variant is a single file, which also inlines dynamically-imported dependencies (e.g., `numcodecs/zstd` and its WASM).
+The `bundled-dynamic` variant instead emits dynamic imports as separate chunk files, so they are only loaded when needed (e.g., when decoding ZSTD-compressed data):
+
+```ts
+import { ParquetAsAnnDataFrameStore } from "parquet-as-virtual-zarr/bundled-dynamic";
+```
+
 ## Development
 
 ```sh

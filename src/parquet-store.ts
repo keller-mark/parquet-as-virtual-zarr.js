@@ -546,9 +546,27 @@ export class ParquetAsAnnDataFrameStore implements AsyncReadable {
       : { name: "bytes", configuration: { endian: "little" } };
     const zarrCodec = this.#zeroCopyCompressedCols.get(colName);
     if (zarrCodec) {
-      return [bytesCodec, { name: zarrCodec }];
+      return [bytesCodec, ParquetAsAnnDataFrameStore.#compressionCodecMeta(zarrCodec)];
     }
     return [bytesCodec];
+  }
+
+  /**
+   * Zarr v3 codec metadata for a bytes-to-bytes compression codec.
+   * The zarr v3 spec requires a configuration for gzip ({ level }) and
+   * zstd ({ level, checksum }), and zarrita/numcodecs destructure it in
+   * fromConfig (zstd throws without one). The level only matters for
+   * encoding, and this store is read-only, so placeholder levels are used.
+   */
+  static #compressionCodecMeta(zarrCodec: string): Record<string, unknown> {
+    switch (zarrCodec) {
+      case "gzip":
+        return { name: "gzip", configuration: { level: 1 } };
+      case "zstd":
+        return { name: "zstd", configuration: { level: 0, checksum: false } };
+      default:
+        return { name: zarrCodec };
+    }
   }
 
   #stringCodecs(): unknown[] {
