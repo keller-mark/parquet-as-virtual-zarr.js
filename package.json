@@ -1,6 +1,6 @@
 {
   "name": "parquet-as-virtual-zarr",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "",
   "license": "MIT",
   "type": "module",
@@ -15,6 +15,10 @@
     "./bundled": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/bundled/index.js"
+    },
+    "./bundled-dynamic": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/bundled-dynamic/index.js"
     }
   },
   "files": [
@@ -22,7 +26,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && vite build --mode bundled-dynamic",
     "generate-fixtures": "uv run fixtures/generate_fixtures.py",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

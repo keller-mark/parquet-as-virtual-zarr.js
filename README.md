@@ -35,6 +35,13 @@ A single-file ESM bundle that includes the dependencies (hyparquet, flechette, n
 import { ParquetAsAnnDataFrameStore } from "parquet-as-virtual-zarr/bundled";
 ```
 
+The `bundled` variant is a single file, which also inlines dynamically-imported dependencies (e.g., `numcodecs/zstd` and its WASM).
+The `bundled-dynamic` variant instead emits dynamic imports as separate chunk files, so they are only loaded when needed (e.g., when decoding ZSTD-compressed data):
+
+```ts
+import { ParquetAsAnnDataFrameStore } from "parquet-as-virtual-zarr/bundled-dynamic";
+```
+
 ## Development
 
 ```sh
